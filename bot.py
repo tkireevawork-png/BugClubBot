@@ -1,20 +1,5 @@
 """
-BugClub bot — версия с базой данных и тестом настроения.
-
-Что умеет:
-1. Подключается к Telegram через токен из переменных окружения.
-2. Главное меню: Анонсы, О Багси, Тест настроения, Мои ошибки,
-   Обратная связь, О клубе.
-3. "Тест настроения" — полноценный диалог до/после встречи (FSM).
-4. "Мои ошибки" — показывает последние ошибки из базы данных.
-5. Админ-команды /new_session и /log_error — только для модератора
-   (список ADMIN_IDS ниже).
-
-Файлы проекта:
-- bot.py (этот файл) — логика общения с Telegram
-- db.py — работа с базой данных SQLite
-- requirements.txt — список зависимостей
-- Procfile — команда запуска для Railway
+BugClub bot — версия с базой данных, тестом настроения и кнопками Назад/Отмена.
 """
 
 import asyncio
@@ -39,13 +24,10 @@ import db
 
 logging.basicConfig(level=logging.INFO)
 
-# Токен хранится в переменных окружения Railway, а не в коде.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ⚠️ ВАЖНО: впиши сюда свой telegram user_id (узнать у @userinfobot).
-# Пока список пуст — ЛЮБОЙ участник сможет открыть встречу и логировать
-# ошибки. Впиши свой id, например: ADMIN_IDS = [123456789]
-ADMIN_IDS = [8905096909]
+# ⚠️ Впиши сюда свой telegram user_id (узнать у @userinfobot).
+ADMIN_IDS = []
 
 router = Router()
 
@@ -70,7 +52,20 @@ class LogError(StatesGroup):
     correction = State()
 
 
-# ---------- Клавиатуры ----------
+# ---------- Вспомогательные функции для клавиатур ----------
+
+def back_cancel_row():
+    """Возвращает ряд с кнопками Назад и Отмена для инлайн-клавиатур."""
+    return [
+        InlineKeyboardButton(text="◀️ Назад", callback_data="back"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
+    ]
+
+
+def back_cancel_inline_keyboard() -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура только с кнопками Назад и Отмена (для текстовых шагов)."""
+    return InlineKeyboardMarkup(inline_keyboard=[back_cancel_row()])
+
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -85,21 +80,22 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def scale_1_10_keyboard(prefix: str) -> InlineKeyboardMarkup:
-    """Кнопки с цифрами 1-10. prefix помогает отличать, к какому
-    вопросу относится нажатие (например 'anxbefore_5')."""
     buttons = [
         InlineKeyboardButton(text=str(n), callback_data=f"{prefix}_{n}")
         for n in range(1, 11)
     ]
-    rows = [buttons[0:5], buttons[5:10]]
+    rows = [buttons[0:5], buttons[5:10], back_cancel_row()]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def before_after_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="До встречи", callback_data="mood_before"),
-        InlineKeyboardButton(text="После встречи", callback_data="mood_after"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="До встречи", callback_data="mood_before"),
+            InlineKeyboardButton(text="После встречи", callback_data="mood_after"),
+        ],
+        back_cancel_row(),
+    ])
 
 
 def emotion_keyboard() -> InlineKeyboardMarkup:
@@ -108,6 +104,7 @@ def emotion_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="😐 Нейтрально", callback_data="emotion_neutral")],
         [InlineKeyboardButton(text="🤔 Любопытно", callback_data="emotion_curious")],
         [InlineKeyboardButton(text="😎 Горжусь, что рискнул(а)", callback_data="emotion_proud")],
+        back_cancel_row(),
     ])
 
 
@@ -116,22 +113,97 @@ def self_correction_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Да, заметил(а) сам(а)", callback_data="selfcorrect_yes")],
         [InlineKeyboardButton(text="Нет", callback_data="selfcorrect_no")],
         [InlineKeyboardButton(text="Ошибок не было", callback_data="selfcorrect_none")],
+        back_cancel_row(),
     ])
 
 
 def kind_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Mistake (оговорка)", callback_data="kind_mistake"),
-        InlineKeyboardButton(text="Error (системная)", callback_data="kind_error"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Mistake (оговорка)", callback_data="kind_mistake"),
+            InlineKeyboardButton(text="Error (системная)", callback_data="kind_error"),
+        ],
+        back_cancel_row(),
+    ])
 
 
 def category_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Grammar", callback_data="cat_grammar"),
-        InlineKeyboardButton(text="Vocabulary", callback_data="cat_vocabulary"),
-        InlineKeyboardButton(text="Pronunciation", callback_data="cat_pronunciation"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="Grammar", callback_data="cat_grammar"),
+            InlineKeyboardButton(text="Vocabulary", callback_data="cat_vocabulary"),
+            InlineKeyboardButton(text="Pronunciation", callback_data="cat_pronunciation"),
+        ],
+        back_cancel_row(),
+    ])
+
+
+# ---------- Функции для отправки вопросов (используются и в начале, и при возврате) ----------
+
+async def ask_mood_before_anxiety(message: Message, state: FSMContext):
+    await state.set_state(MoodBefore.anxiety)
+    await message.answer(
+        "Насколько ты сейчас волнуешься перед тем, как говорить на английском? (1 — совсем нет, 10 — очень)",
+        reply_markup=scale_1_10_keyboard("anxbefore"),
+    )
+
+
+async def ask_mood_before_fear(message: Message, state: FSMContext):
+    await state.set_state(MoodBefore.fear)
+    await message.answer(
+        "Насколько боишься, что тебя осудят за ошибку? (1 — совсем нет, 10 — очень)",
+        reply_markup=scale_1_10_keyboard("fear"),
+    )
+
+
+async def ask_mood_after_anxiety(message: Message, state: FSMContext):
+    await state.set_state(MoodAfter.anxiety)
+    await message.answer(
+        "А сейчас, после встречи, насколько ты тревожишься? (1 — совсем нет, 10 — очень)",
+        reply_markup=scale_1_10_keyboard("anxafter"),
+    )
+
+
+async def ask_mood_after_emotion(message: Message, state: FSMContext):
+    await state.set_state(MoodAfter.emotion)
+    await message.answer(
+        "Если сегодня был момент, когда ты ошибся(-лась) — что почувствовал(а)?",
+        reply_markup=emotion_keyboard(),
+    )
+
+
+async def ask_mood_after_self_corrected(message: Message, state: FSMContext):
+    await state.set_state(MoodAfter.self_corrected)
+    await message.answer(
+        "Заметил(а) свою ошибку сам(а), до того как услышал(а) фидбек?",
+        reply_markup=self_correction_keyboard(),
+    )
+
+
+async def ask_log_error_kind(message: Message, state: FSMContext):
+    await state.set_state(LogError.kind)
+    await message.answer("Это mistake или error?", reply_markup=kind_keyboard())
+
+
+async def ask_log_error_category(message: Message, state: FSMContext):
+    await state.set_state(LogError.category)
+    await message.answer("Категория?", reply_markup=category_keyboard())
+
+
+async def ask_log_error_text(message: Message, state: FSMContext):
+    await state.set_state(LogError.text)
+    await message.answer(
+        "Напиши, как сказал участник (можно без имени):",
+        reply_markup=back_cancel_inline_keyboard(),
+    )
+
+
+async def ask_log_error_correction(message: Message, state: FSMContext):
+    await state.set_state(LogError.correction)
+    await message.answer(
+        "А как правильно?",
+        reply_markup=back_cancel_inline_keyboard(),
+    )
 
 
 # ---------- Базовые команды ----------
@@ -147,7 +219,6 @@ async def cmd_start(message: Message):
 
 @router.message(F.text == "📅 Анонсы")
 async def show_announcements(message: Message):
-    # TODO: подтягивать реальную дату и тему из таблицы sessions.
     await message.answer(
         "Ближайшая встреча: 11 октября в 18:00. "
         "Тема: Starting from Scratch"
@@ -156,7 +227,6 @@ async def show_announcements(message: Message):
 
 @router.message(F.text == "🎤 Обратная связь")
 async def feedback(message: Message):
-    # TODO: сохранять следующее сообщение пользователя как анонимный фидбек
     await message.answer(
         "Напиши свой анонимный фидбек о встрече одним сообщением — я его сохраню."
     )
@@ -221,12 +291,7 @@ async def mood_test_start(message: Message):
 
 @router.callback_query(F.data == "mood_before")
 async def mood_before_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(MoodBefore.anxiety)
-    await callback.message.answer(
-        "Насколько ты сейчас волнуешься перед тем, как говорить на английском? "
-        "(1 — совсем нет, 10 — очень)",
-        reply_markup=scale_1_10_keyboard("anxbefore"),
-    )
+    await ask_mood_before_anxiety(callback.message, state)
     await callback.answer()
 
 
@@ -234,11 +299,7 @@ async def mood_before_start(callback: CallbackQuery, state: FSMContext):
 async def mood_before_anxiety(callback: CallbackQuery, state: FSMContext):
     score = int(callback.data.split("_")[1])
     await state.update_data(anxiety=score)
-    await state.set_state(MoodBefore.fear)
-    await callback.message.answer(
-        "Насколько боишься, что тебя осудят за ошибку? (1 — совсем нет, 10 — очень)",
-        reply_markup=scale_1_10_keyboard("fear"),
-    )
+    await ask_mood_before_fear(callback.message, state)
     await callback.answer()
 
 
@@ -260,11 +321,7 @@ async def mood_before_fear(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "mood_after")
 async def mood_after_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(MoodAfter.anxiety)
-    await callback.message.answer(
-        "А сейчас, после встречи, насколько ты тревожишься? (1 — совсем нет, 10 — очень)",
-        reply_markup=scale_1_10_keyboard("anxafter"),
-    )
+    await ask_mood_after_anxiety(callback.message, state)
     await callback.answer()
 
 
@@ -272,29 +329,21 @@ async def mood_after_start(callback: CallbackQuery, state: FSMContext):
 async def mood_after_anxiety(callback: CallbackQuery, state: FSMContext):
     score = int(callback.data.split("_")[1])
     await state.update_data(anxiety=score)
-    await state.set_state(MoodAfter.emotion)
-    await callback.message.answer(
-        "Если сегодня был момент, когда ты ошибся(-лась) — что почувствовал(а)?",
-        reply_markup=emotion_keyboard(),
-    )
+    await ask_mood_after_emotion(callback.message, state)
     await callback.answer()
 
 
 @router.callback_query(MoodAfter.emotion, F.data.startswith("emotion_"))
 async def mood_after_emotion(callback: CallbackQuery, state: FSMContext):
-    emotion = callback.data.split("_")[1]  # shame / neutral / curious / proud
+    emotion = callback.data.split("_")[1]
     await state.update_data(emotion=emotion)
-    await state.set_state(MoodAfter.self_corrected)
-    await callback.message.answer(
-        "Заметил(а) свою ошибку сам(а), до того как услышал(а) фидбек?",
-        reply_markup=self_correction_keyboard(),
-    )
+    await ask_mood_after_self_corrected(callback.message, state)
     await callback.answer()
 
 
 @router.callback_query(MoodAfter.self_corrected, F.data.startswith("selfcorrect_"))
 async def mood_after_self_corrected(callback: CallbackQuery, state: FSMContext):
-    self_corrected = callback.data.split("_")[1]  # yes / no / none
+    self_corrected = callback.data.split("_")[1]
     data = await state.get_data()
     session_id = db.get_current_session_id()
     db.save_mood_after(
@@ -336,37 +385,40 @@ async def log_error_start(message: Message, state: FSMContext):
     if session_id is None:
         await message.answer("Сначала открой встречу командой /new_session")
         return
-    await state.set_state(LogError.kind)
-    await message.answer("Это mistake или error?", reply_markup=kind_keyboard())
+    await ask_log_error_kind(message, state)
 
 
 @router.callback_query(LogError.kind, F.data.startswith("kind_"))
 async def log_error_kind(callback: CallbackQuery, state: FSMContext):
-    kind = callback.data.split("_")[1]  # mistake / error
+    kind = callback.data.split("_")[1]
     await state.update_data(kind=kind)
-    await state.set_state(LogError.category)
-    await callback.message.answer("Категория?", reply_markup=category_keyboard())
+    await ask_log_error_category(callback.message, state)
     await callback.answer()
 
 
 @router.callback_query(LogError.category, F.data.startswith("cat_"))
 async def log_error_category(callback: CallbackQuery, state: FSMContext):
-    category = callback.data.split("_")[1]  # grammar / vocabulary / pronunciation
+    category = callback.data.split("_")[1]
     await state.update_data(category=category)
-    await state.set_state(LogError.text)
-    await callback.message.answer("Напиши, как сказал участник (можно без имени):")
+    await ask_log_error_text(callback.message, state)
     await callback.answer()
 
 
 @router.message(LogError.text)
 async def log_error_text(message: Message, state: FSMContext):
+    # Если пользователь нажал "Назад" (текст не должен прийти, но на всякий случай)
+    if message.text == "◀️ Назад":
+        await back_handler_logic(message, state)
+        return
     await state.update_data(text=message.text)
-    await state.set_state(LogError.correction)
-    await message.answer("А как правильно?")
+    await ask_log_error_correction(message, state)
 
 
 @router.message(LogError.correction)
 async def log_error_correction(message: Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_handler_logic(message, state)
+        return
     data = await state.get_data()
     session_id = db.get_current_session_id()
     db.save_error(
@@ -377,7 +429,59 @@ async def log_error_correction(message: Message, state: FSMContext):
         kind=data["kind"],
     )
     await state.clear()
-    await message.answer("Записал 🐞")
+    await message.answer("Записал 🐞", reply_markup=main_menu_keyboard())
+
+
+# ---------- Обработчики Назад и Отмена ----------
+
+async def back_handler_logic(message: Message, state: FSMContext):
+    """Логика возврата на предыдущий шаг. Вызывается из колбэка или из текстового сообщения."""
+    current = await state.get_state()
+    prev_map = {
+        "MoodBefore:fear": MoodBefore.anxiety,
+        "MoodAfter:emotion": MoodAfter.anxiety,
+        "MoodAfter:self_corrected": MoodAfter.emotion,
+        "LogError:category": LogError.kind,
+        "LogError:text": LogError.category,
+        "LogError:correction": LogError.text,
+    }
+    prev_state = prev_map.get(current)
+    if prev_state is None:
+        # Нет предыдущего шага — отменяем
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
+        return
+
+    # Определяем, какой вопрос задать для предыдущего состояния
+    if prev_state == MoodBefore.anxiety:
+        await ask_mood_before_anxiety(message, state)
+    elif prev_state == MoodAfter.anxiety:
+        await ask_mood_after_anxiety(message, state)
+    elif prev_state == MoodAfter.emotion:
+        await ask_mood_after_emotion(message, state)
+    elif prev_state == LogError.kind:
+        await ask_log_error_kind(message, state)
+    elif prev_state == LogError.category:
+        await ask_log_error_category(message, state)
+    elif prev_state == LogError.text:
+        await ask_log_error_text(message, state)
+    else:
+        # fallback
+        await state.clear()
+        await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
+
+
+@router.callback_query(F.data == "back")
+async def back_handler(callback: CallbackQuery, state: FSMContext):
+    await back_handler_logic(callback.message, state)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cancel")
+async def cancel_handler(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
+    await callback.answer()
 
 
 # ---------- Запуск ----------
