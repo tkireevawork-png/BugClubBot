@@ -45,7 +45,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # ⚠️ ВАЖНО: впиши сюда свой telegram user_id (узнать у @userinfobot).
 # Пока список пуст — ЛЮБОЙ участник сможет открыть встречу и логировать
 # ошибки. Впиши свой id, например: ADMIN_IDS = [123456789]
-ADMIN_IDS = [@taniabug]
+ADMIN_IDS = [8905096909]
 
 router = Router()
 
