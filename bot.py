@@ -1,5 +1,5 @@
 """
-BugClub bot — версия с PostgreSQL, базой данных, тестом настроения и кнопками Назад/Отмена (версия 1).
+BugClub bot — версия с PostgreSQL, привязкой ошибок и обратной связью.
 """
 
 import asyncio
@@ -48,8 +48,13 @@ class MoodAfter(StatesGroup):
 class LogError(StatesGroup):
     kind = State()
     category = State()
+    who = State()       # ← НОВОЕ: шаг "кто это сказал"
     text = State()
     correction = State()
+
+
+class Feedback(StatesGroup):
+    waiting = State()   # ← НОВОЕ: ждём текст фидбека
 
 
 # ---------- Вспомогательные функции для клавиатур ----------
@@ -188,10 +193,20 @@ async def ask_log_error_category(message: Message, state: FSMContext):
     await message.answer("Категория?", reply_markup=category_keyboard())
 
 
+async def ask_log_error_who(message: Message, state: FSMContext):
+    """Шаг "Кто это сказал?" — админ вводит @username участника или "аноним"."""
+    await state.set_state(LogError.who)
+    await message.answer(
+        "Кто это сказал? Введи @username участника (например, @ivan) "
+        "или напиши «аноним»:",
+        reply_markup=back_cancel_inline_keyboard(),
+    )
+
+
 async def ask_log_error_text(message: Message, state: FSMContext):
     await state.set_state(LogError.text)
     await message.answer(
-        "Напиши, как сказал участник (можно без имени):",
+        "Напиши, как сказал участник:",
         reply_markup=back_cancel_inline_keyboard(),
     )
 
@@ -208,6 +223,12 @@ async def ask_log_error_correction(message: Message, state: FSMContext):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
+    # Сохраняем пользователя в базу — чтобы админ мог найти его по @username
+    await db.save_user(
+        user_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    )
     await message.answer(
         "Привет! Я Багси 🐞 — бот BugClub.\n"
         "Здесь можно ошибаться, и от этого расти. Выбери, что тебя интересует:",
@@ -220,13 +241,6 @@ async def show_announcements(message: Message):
     await message.answer(
         "Ближайшая встреча: 11 октября в 18:00. "
         "Тема: Starting from Scratch"
-    )
-
-
-@router.message(F.text == "🎤 Обратная связь")
-async def feedback(message: Message):
-    await message.answer(
-        "Напиши свой анонимный фидбек о встрече одним сообщением — я его сохраню."
     )
 
 
@@ -251,6 +265,53 @@ async def about_bagsy(message: Message):
             "Я буду помогать тебе на встречах, следить за настроением и хранить твои победы."
         ),
     )
+
+
+# ---------- Обратная связь ----------
+
+@router.message(F.text == "🎤 Обратная связь")
+async def feedback_start(message: Message, state: FSMContext):
+    await state.set_state(Feedback.waiting)
+    await message.answer(
+        "Напиши свой анонимный фидбек о встрече одним сообщением — я передам его модератору.",
+        reply_markup=back_cancel_inline_keyboard(),
+    )
+
+
+@router.message(Feedback.waiting)
+async def feedback_receive(message: Message, state: FSMContext):
+    # Проверяем нажатия кнопок (на случай, если пользователь нажал Назад/Отмена)
+    if message.text == "◀️ Назад":
+        await back_handler_logic(message, state)
+        return
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("Отменено.", reply_markup=main_menu_keyboard())
+        return
+
+    # Пересылаем фидбек всем админам
+    sent = 0
+    for admin_id in ADMIN_IDS:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"🎤 Анонимный фидбек:\n\n{message.text}"
+            )
+            sent += 1
+        except Exception as e:
+            logging.error(f"Не удалось отправить фидбек админу {admin_id}: {e}")
+
+    await state.clear()
+    if sent > 0:
+        await message.answer(
+            "Спасибо! Твой фидбек передан модератору 🐞",
+            reply_markup=main_menu_keyboard(),
+        )
+    else:
+        await message.answer(
+            "Спасибо! Фидбек сохранён, но модератор пока не подключён.",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 # ---------- Мои ошибки ----------
@@ -402,8 +463,38 @@ async def log_error_kind(callback: CallbackQuery, state: FSMContext):
 async def log_error_category(callback: CallbackQuery, state: FSMContext):
     category = callback.data.split("_")[1]
     await state.update_data(category=category)
-    await ask_log_error_text(callback.message, state)
+    await ask_log_error_who(callback.message, state)
     await callback.answer()
+
+
+@router.message(LogError.who)
+async def log_error_who(message: Message, state: FSMContext):
+    if message.text == "◀️ Назад":
+        await back_handler_logic(message, state)
+        return
+
+    text = message.text.strip()
+
+    if text.lower() == "аноним":
+        await state.update_data(user_id=None)
+        await ask_log_error_text(message, state)
+        return
+
+    # Убираем @, если есть
+    username = text.lstrip("@")
+    user_id = await db.get_user_id_by_username(username)
+
+    if user_id is None:
+        await message.answer(
+            f"Не нашёл участника @{username} в базе. "
+            "Убедись, что он хотя бы раз запускал бота (/start), "
+            "или напиши «аноним».",
+            reply_markup=back_cancel_inline_keyboard(),
+        )
+        return
+
+    await state.update_data(user_id=user_id)
+    await ask_log_error_text(message, state)
 
 
 @router.message(LogError.text)
@@ -428,6 +519,7 @@ async def log_error_correction(message: Message, state: FSMContext):
         correction_text=message.text,
         category=data["category"],
         kind=data["kind"],
+        user_id=data.get("user_id"),
     )
     await state.clear()
     await message.answer("Записал 🐞", reply_markup=main_menu_keyboard())
@@ -442,7 +534,8 @@ async def back_handler_logic(message: Message, state: FSMContext):
         "MoodAfter:emotion": MoodAfter.anxiety,
         "MoodAfter:self_corrected": MoodAfter.emotion,
         "LogError:category": LogError.kind,
-        "LogError:text": LogError.category,
+        "LogError:who": LogError.category,
+        "LogError:text": LogError.who,
         "LogError:correction": LogError.text,
     }
     prev_state = prev_map.get(current)
@@ -461,6 +554,8 @@ async def back_handler_logic(message: Message, state: FSMContext):
         await ask_log_error_kind(message, state)
     elif prev_state == LogError.category:
         await ask_log_error_category(message, state)
+    elif prev_state == LogError.who:
+        await ask_log_error_who(message, state)
     elif prev_state == LogError.text:
         await ask_log_error_text(message, state)
     else:

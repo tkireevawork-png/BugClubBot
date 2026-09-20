@@ -6,15 +6,12 @@ import asyncpg
 import os
 from datetime import datetime
 
-# Railway автоматически создаёт эту переменную, когда вы добавляете PostgreSQL.
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Пул соединений — создаётся один раз при старте бота и используется всеми запросами.
 pool: asyncpg.Pool = None
 
 
 async def init_db():
-    """Создаёт пул соединений и таблицы, если их ещё нет."""
     global pool
     pool = await asyncpg.create_pool(DATABASE_URL)
 
@@ -66,6 +63,39 @@ async def init_db():
             "INSERT INTO current_session (id, session_id) VALUES (1, NULL) "
             "ON CONFLICT (id) DO NOTHING"
         )
+
+        # Новая таблица: здесь храним всех, кто хоть раз нажал /start
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_interaction TIMESTAMP NOT NULL
+            )
+        """)
+
+
+async def save_user(user_id: int, username: str = None, first_name: str = None):
+    """Сохраняет или обновляет пользователя при /start."""
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (user_id, username, first_name, last_interaction)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE
+            SET username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                last_interaction = EXCLUDED.last_interaction
+        """, user_id, username, first_name, datetime.utcnow())
+
+
+async def get_user_id_by_username(username: str):
+    """Ищет user_id по username (без @). Возвращает None, если не найден."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM users WHERE LOWER(username) = LOWER($1)",
+            username
+        )
+        return row["user_id"] if row else None
 
 
 async def start_new_session(topic: str) -> int:
