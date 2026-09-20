@@ -1,5 +1,5 @@
 """
-BugClub bot — версия с базой данных, тестом настроения и кнопками Назад/Отмена.
+BugClub bot — версия с PostgreSQL, базой данных, тестом настроения и кнопками Назад/Отмена.
 """
 
 import asyncio
@@ -55,7 +55,6 @@ class LogError(StatesGroup):
 # ---------- Вспомогательные функции для клавиатур ----------
 
 def back_cancel_row():
-    """Возвращает ряд с кнопками Назад и Отмена для инлайн-клавиатур."""
     return [
         InlineKeyboardButton(text="◀️ Назад", callback_data="back"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
@@ -63,7 +62,6 @@ def back_cancel_row():
 
 
 def back_cancel_inline_keyboard() -> InlineKeyboardMarkup:
-    """Инлайн-клавиатура только с кнопками Назад и Отмена (для текстовых шагов)."""
     return InlineKeyboardMarkup(inline_keyboard=[back_cancel_row()])
 
 
@@ -138,7 +136,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ---------- Функции для отправки вопросов (используются и в начале, и при возврате) ----------
+# ---------- Функции для отправки вопросов ----------
 
 async def ask_mood_before_anxiety(message: Message, state: FSMContext):
     await state.set_state(MoodBefore.anxiety)
@@ -259,7 +257,7 @@ async def about_bagsy(message: Message):
 
 @router.message(F.text == "📝 Мои ошибки")
 async def my_errors(message: Message):
-    rows = db.get_user_errors(message.from_user.id, limit=5)
+    rows = await db.get_user_errors(message.from_user.id, limit=5)
     if not rows:
         await message.answer(
             "Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂"
@@ -267,7 +265,11 @@ async def my_errors(message: Message):
         return
 
     lines = ["Вот твои последние ошибки:\n"]
-    for error_text, correction_text, category, kind in rows:
+    for row in rows:
+        error_text = row["error_text"]
+        correction_text = row["correction_text"]
+        category = row["category"]
+        kind = row["kind"]
         kind_label = "оговорка" if kind == "mistake" else "системная"
         lines.append(f"• [{category}, {kind_label}] «{error_text}» → «{correction_text}»")
     lines.append("\nПерсональные упражнения на их основе появятся здесь чуть позже.")
@@ -278,7 +280,7 @@ async def my_errors(message: Message):
 
 @router.message(F.text == "📊 Тест настроения")
 async def mood_test_start(message: Message):
-    session_id = db.get_current_session_id()
+    session_id = await db.get_current_session_id()
     if session_id is None:
         await message.answer(
             "Пока нет активной встречи — тест откроется, когда модератор начнёт сессию."
@@ -307,8 +309,8 @@ async def mood_before_anxiety(callback: CallbackQuery, state: FSMContext):
 async def mood_before_fear(callback: CallbackQuery, state: FSMContext):
     fear_score = int(callback.data.split("_")[1])
     data = await state.get_data()
-    session_id = db.get_current_session_id()
-    db.save_mood_before(
+    session_id = await db.get_current_session_id()
+    await db.save_mood_before(
         user_id=callback.from_user.id,
         session_id=session_id,
         anxiety_score=data["anxiety"],
@@ -345,8 +347,8 @@ async def mood_after_emotion(callback: CallbackQuery, state: FSMContext):
 async def mood_after_self_corrected(callback: CallbackQuery, state: FSMContext):
     self_corrected = callback.data.split("_")[1]
     data = await state.get_data()
-    session_id = db.get_current_session_id()
-    db.save_mood_after(
+    session_id = await db.get_current_session_id()
+    await db.save_mood_after(
         user_id=callback.from_user.id,
         session_id=session_id,
         anxiety_score=data["anxiety"],
@@ -368,7 +370,7 @@ async def new_session(message: Message):
     if not topic:
         await message.answer("Формат: /new_session Тема сегодняшних дебатов")
         return
-    session_id = db.start_new_session(topic)
+    session_id = await db.start_new_session(topic)
     await message.answer(
         f"Встреча #{session_id} на тему «{topic}» открыта. "
         "Тест настроения теперь доступен."
@@ -381,7 +383,7 @@ async def new_session(message: Message):
 async def log_error_start(message: Message, state: FSMContext):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    session_id = db.get_current_session_id()
+    session_id = await db.get_current_session_id()
     if session_id is None:
         await message.answer("Сначала открой встречу командой /new_session")
         return
@@ -406,7 +408,6 @@ async def log_error_category(callback: CallbackQuery, state: FSMContext):
 
 @router.message(LogError.text)
 async def log_error_text(message: Message, state: FSMContext):
-    # Если пользователь нажал "Назад" (текст не должен прийти, но на всякий случай)
     if message.text == "◀️ Назад":
         await back_handler_logic(message, state)
         return
@@ -420,8 +421,8 @@ async def log_error_correction(message: Message, state: FSMContext):
         await back_handler_logic(message, state)
         return
     data = await state.get_data()
-    session_id = db.get_current_session_id()
-    db.save_error(
+    session_id = await db.get_current_session_id()
+    await db.save_error(
         session_id=session_id,
         error_text=data["text"],
         correction_text=message.text,
@@ -435,7 +436,6 @@ async def log_error_correction(message: Message, state: FSMContext):
 # ---------- Обработчики Назад и Отмена ----------
 
 async def back_handler_logic(message: Message, state: FSMContext):
-    """Логика возврата на предыдущий шаг. Вызывается из колбэка или из текстового сообщения."""
     current = await state.get_state()
     prev_map = {
         "MoodBefore:fear": MoodBefore.anxiety,
@@ -447,12 +447,10 @@ async def back_handler_logic(message: Message, state: FSMContext):
     }
     prev_state = prev_map.get(current)
     if prev_state is None:
-        # Нет предыдущего шага — отменяем
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
         return
 
-    # Определяем, какой вопрос задать для предыдущего состояния
     if prev_state == MoodBefore.anxiety:
         await ask_mood_before_anxiety(message, state)
     elif prev_state == MoodAfter.anxiety:
@@ -466,7 +464,6 @@ async def back_handler_logic(message: Message, state: FSMContext):
     elif prev_state == LogError.text:
         await ask_log_error_text(message, state)
     else:
-        # fallback
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
 
@@ -487,7 +484,7 @@ async def cancel_handler(callback: CallbackQuery, state: FSMContext):
 # ---------- Запуск ----------
 
 async def main():
-    db.init_db()
+    await db.init_db()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
