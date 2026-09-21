@@ -11,7 +11,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Бесплатная модель. Если будет тормозить — можно заменить на другую.
 # Список бесплатных моделей: openrouter.ai/models?max_price=0
-MODEL = "google/gemini-2.0-flash-exp:free"
+MODEL = "deepseek/deepseek-chat:free"
 
 
 async def generate_digest(errors: list) -> str:
