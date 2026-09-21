@@ -22,7 +22,7 @@ from aiogram.types import (
 )
 
 import db
-import llm
+import llm_backup
 
 logging.basicConfig(level=logging.INFO)
 
@@ -326,7 +326,7 @@ async def my_errors(message: Message):
             return
 
         await message.answer("🧠 Генерирую персональный разбор...")
-        digest = await llm.generate_digest(all_errors)
+        digest = await llm_backup.generate_digest(all_errors)
         await db.log_llm_usage(message.from_user.id, "digest")
         if digest:
             for part in split_message(f"🐞 Разбор от Багси:\n\n{digest}"):
@@ -420,7 +420,7 @@ async def quiz_start(message: Message, state: FSMContext):
         return
 
     await message.answer("🏋️ Готовлю персональные упражнения...")
-    questions = await llm.generate_quiz(rows)
+    questions = await llm_backup.generate_quiz(rows)
     await db.log_llm_usage(message.from_user.id, "quiz")
     if not questions:
         await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
@@ -501,7 +501,7 @@ async def quiz_text_answer(message: Message, state: FSMContext):
     q = questions[current]
 
     await message.answer("🤔 Проверяю ответ...")
-    result = await llm.check_text_answer(
+    result = await llm_backup.check_text_answer(
         sentence=q["sentence"],
         correct_answer=q["correct_answer"],
         user_answer=message.text,
@@ -570,7 +570,7 @@ async def close_session(message: Message):
     # LLM-дайджест
     if errors:
         await message.answer("🧠 Готовлю педагогический дайджест...")
-        digest = await llm.generate_session_digest(errors, topic)
+        digest = await llm_backup.generate_session_digest(errors, topic)
         if digest:
             for part in split_message(f"🧠 Что заметил Багси:\n\n{digest}"):
                 await message.answer(part)
