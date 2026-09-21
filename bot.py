@@ -311,7 +311,7 @@ async def my_errors(message: Message):
         await message.answer("Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂")
         return
 
-    lines = ["Вот твои последние ошибки:\n"]
+    lines = ["Смотри, что у нас есть за неделю:\n"]
     for row in rows:
         kind_label = "оговорка" if row["kind"] == "mistake" else "системная"
         lines.append(f"• [{row['category']}, {kind_label}] «{row['error_text']}» → «{row['correction_text']}»")
@@ -440,7 +440,9 @@ async def send_quiz_question(message: Message, state: FSMContext):
         total = len(questions)
         await state.clear()
         await message.answer(
-            f"🎉 Упражнения пройдены!\n\nПравильных: {score} из {total}.\n\nМолодец! 🐞"
+            f"🎉 Готово! {score} из {total}.\n\n"
+            f"Ты потренировал(а) то, что реально пригодится в разговоре — "
+            f"это и есть рост 🐞"
         )
         return
 
@@ -477,13 +479,15 @@ async def quiz_answer(cb: CallbackQuery, state: FSMContext):
         pass
 
     if chosen == q["correct_index"]:
-        await cb.message.answer(f"✅ Верно!\n\n{q['explanation']}")
+        await cb.message.answer(f"✅ Точно! 🐞\n\n{q['explanation']}")
         score += 1
     else:
         correct_letter = chr(97 + q["correct_index"])
         correct_opt = q["options"][q["correct_index"]]
         await cb.message.answer(
-            f"❌ Не совсем.\n\nПравильный: {correct_letter}) {correct_opt}\n\n{q['explanation']}"
+            f"Хм, ухо цепляется 😊\n\n"
+            f"Естественнее: {correct_letter}) {correct_opt}\n\n"
+            f"{q['explanation']}"
         )
 
     await state.update_data(current=current + 1, score=score)
@@ -507,12 +511,14 @@ async def quiz_text_answer(message: Message, state: FSMContext):
     )
 
     if result and result.get("is_correct"):
-        await message.answer(f"✅ Верно!\n\n{result.get('explanation', '')}")
+        await message.answer(f"✅ Точно! 🐞\n\n{result.get('explanation', '')}")
         score += 1
     else:
         expl = result.get("explanation", "") if result else ""
         await message.answer(
-            f"❌ Не совсем.\n\nЭталон: {q['correct_answer']}\n\n{expl}"
+            f"Почти — давай посмотрим 😊\n\n"
+            f"Как звучит естественнее: {q['correct_answer']}\n\n"
+            f"{expl}"
         )
 
     await state.update_data(current=current + 1, score=score)
