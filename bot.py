@@ -5,6 +5,7 @@ BugClub bot — версия с PostgreSQL, привязкой ошибок и �
 import asyncio
 import logging
 import os
+import llm
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
@@ -320,21 +321,30 @@ async def feedback_receive(message: Message, state: FSMContext):
 async def my_errors(message: Message):
     rows = await db.get_user_errors(message.from_user.id, limit=5)
     if not rows:
-        await message.answer(
-            "Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂"
-        )
+        await message.answer("Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂")
         return
 
+    # Показываем список последних ошибок
     lines = ["Вот твои последние ошибки:\n"]
     for row in rows:
-        error_text = row["error_text"]
-        correction_text = row["correction_text"]
-        category = row["category"]
-        kind = row["kind"]
-        kind_label = "оговорка" if kind == "mistake" else "системная"
-        lines.append(f"• [{category}, {kind_label}] «{error_text}» → «{correction_text}»")
-    lines.append("\nПерсональные упражнения на их основе появятся здесь чуть позже.")
+        kind_label = "оговорка" if row["kind"] == "mistake" else "системная"
+        lines.append(f"• [{row['category']}, {kind_label}] «{row['error_text']}» → «{row['correction_text']}»")
+    
     await message.answer("\n".join(lines))
+
+    # Если ошибок 3 и больше — генерируем персональный разбор от LLM
+    all_errors = await db.get_all_user_errors(message.from_user.id)
+    if len(all_errors) >= 3:
+        await message.answer("🧠 Генерирую персональный разбор... Это займет несколько секунд.")
+        digest = await llm.generate_digest(all_errors)
+        if digest:
+            await message.answer(f"🐞 *Разбор от Багси:*\n\n{digest}", parse_mode="Markdown")
+        else:
+            await message.answer("Не удалось сгенерировать разбор. Попробуй позже.")
+    else:
+        await message.answer(
+            "Пройди ещё несколько встреч — и я смогу дать персональный разбор твоих ошибок! 🐞"
+        )
 
 
 # ---------- Тест настроения ----------

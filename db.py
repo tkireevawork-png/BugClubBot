@@ -151,3 +151,15 @@ async def get_user_errors(user_id: int, limit: int = 5):
             LIMIT $2
         """, user_id, limit)
         return rows
+
+
+async def get_all_user_errors(user_id: int):
+    """Возвращает ВСЕ ошибки пользователя (для LLM-дайджеста)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT error_text, correction_text, category, kind
+            FROM errors_log
+            WHERE user_id = $1
+            ORDER BY id DESC
+        """, user_id)
+        return rows
