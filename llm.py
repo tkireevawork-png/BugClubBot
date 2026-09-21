@@ -1,49 +1,27 @@
 """
-llm.py — работа с LLM через OpenRouter с автоматическим перебором моделей.
+llm.py — работа с LLM через прямое API DeepSeek.
 """
 
-import aiohttp
 import os
 import logging
+from openai import AsyncOpenAI
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Инициализируем клиент OpenAI, но указываем ему адрес DeepSeek
+client = AsyncOpenAI(
+    api_key=os.getenv("DEEPSEEK_API_KEY"),
+    base_url="https://api.deepseek.com"
+)
 
-# Список бесплатных моделей. Бот пробует их по очереди, пока какая-нибудь
-# не ответит. Если все недоступны — возвращает None.
-# Актуальные бесплатные модели: openrouter.ai/models?max_price=0
-MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "mistralai/mistral-7b-instruct:free",
-    "microsoft/phi-3-medium-128k-instruct:free",
-]
-
-
-async def call_model(session: aiohttp.ClientSession, model: str, headers: dict, payload: dict) -> str:
-    """Пробует одну модель. Возвращает текст ответа или None при ошибке."""
-    payload["model"] = model
-    try:
-        async with session.post(OPENROUTER_URL, headers=headers, json=payload) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logging.warning(f"Модель {model} не сработала ({response.status}): {error_text[:200]}")
-                return None
-            data = await response.json()
-            return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        logging.error(f"Ошибка при запросе к {model}: {e}")
-        return None
+# Модель для анализа. deepseek-chat — это актуальная версия.
+MODEL = "deepseek-chat"
 
 
 async def generate_digest(errors: list) -> str:
     """
-    Принимает список ошибок и возвращает персональный разбор.
-    Перебирает модели по очереди, пока одна не ответит.
+    Принимает список ошибок и возвращает персональный разбор от DeepSeek.
     """
-    if not OPENROUTER_API_KEY:
-        logging.error("OPENROUTER_API_KEY не задан в переменных окружения")
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        logging.error("DEEPSEEK_API_KEY не задан в переменных окружения")
         return None
 
     # Собираем ошибки в текст для промпта
@@ -66,29 +44,18 @@ async def generate_digest(errors: list) -> str:
 
     user_prompt = f"Вот ошибки участника за последние встречи:\n\n{errors_text}\n\nДай персональный разбор."
 
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": 500,
-        "temperature": 0.7,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        for model in MODELS:
-            logging.info(f"Пробую модель: {model}")
-            result = await call_model(session, model, headers, payload)
-            if result:
-                logging.info(f"Успех с моделью: {model}")
-                return result
-            # небольшая пауза между попытками
-            await aiohttp.helpers.asyncio.sleep(1)
-
-    logging.error("Все модели из списка не сработали.")
-    return None
+    try:
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=500,
+            temperature=0.7,
+        )
+        logging.info(f"Успех. Модель: {response.model}")
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Ошибка при запросе к DeepSeek: {e}")
+        return None
