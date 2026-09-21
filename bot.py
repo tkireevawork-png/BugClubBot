@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # ⚠️ Впиши сюда свой telegram user_id (узнать у @userinfobot).
-ADMIN_IDS = [8905096909]
+ADMIN_IDS = [710128753, 8905096909]
 
 router = Router()
 
