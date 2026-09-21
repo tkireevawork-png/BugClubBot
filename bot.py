@@ -3,6 +3,7 @@ BugClub bot — версия с PostgreSQL, привязкой ошибок и �
 """
 
 import asyncio
+from email.mime import message
 import logging
 import os
 import llm
@@ -22,6 +23,22 @@ from aiogram.types import (
 )
 
 import db
+
+def split_message(text: str, limit: int = 4000):
+    """Режет длинный текст на куски по limit символов, не разрывая слова."""
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    while text:
+        if len(text) <= limit:
+            parts.append(text)
+            break
+        cut = text.rfind(" ", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:].lstrip()
+    return parts
 
 logging.basicConfig(level=logging.INFO)
 
@@ -333,13 +350,14 @@ async def my_errors(message: Message):
     
     await message.answer("\n".join(lines))
 
-    # Если ошибок 3 и больше — генерируем персональный разбор от LLM
+        # Если ошибок 3 и больше — генерируем персональный разбор от LLM
     all_errors = await db.get_all_user_errors(message.from_user.id)
     if len(all_errors) >= 3:
         await message.answer("🧠 Генерирую персональный разбор... Это займет несколько секунд.")
         digest = await llm.generate_digest(all_errors)
         if digest:
-            await message.answer(f"🐞 Разбор от Багси:\n\n{digest}")
+            for part in split_message(f"🐞 Разбор от Багси:\n\n{digest}"):
+                await message.answer(part)
         else:
             await message.answer("Не удалось сгенерировать разбор. Попробуй позже.")
     else:
@@ -370,7 +388,8 @@ async def exercises(message: Message):
     await message.answer("🏋️ Готовлю персональные упражнения... Это займёт несколько секунд.")
     text = await llm.generate_exercises(rows)
     if text:
-        await message.answer(f"🏋️ Упражнения от Багси:\n\n{text}")
+        for part in split_message(f"🏋️ Упражнения от Багси:\n\n{text}"):
+            await message.answer(part)
     else:
         await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
 
