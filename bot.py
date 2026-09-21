@@ -1,12 +1,10 @@
 """
-BugClub bot — версия с PostgreSQL, привязкой ошибок и обратной связью.
+BugClub bot — версия с PostgreSQL, LLM-разбором и интерактивными упражнениями.
 """
 
 import asyncio
-from email.mime import message
 import logging
 import os
-import llm
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
@@ -23,6 +21,19 @@ from aiogram.types import (
 )
 
 import db
+import llm
+
+logging.basicConfig(level=logging.INFO)
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# ⚠️ Впиши сюда свой telegram user_id (узнать у @userinfobot).
+ADMIN_IDS = []
+
+router = Router()
+
+
+# ---------- Вспомогательные функции ----------
 
 def split_message(text: str, limit: int = 4000):
     """Режет длинный текст на куски по limit символов, не разрывая слова."""
@@ -39,15 +50,6 @@ def split_message(text: str, limit: int = 4000):
         parts.append(text[:cut])
         text = text[cut:].lstrip()
     return parts
-
-logging.basicConfig(level=logging.INFO)
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# ⚠️ Впиши сюда свой telegram user_id (узнать у @userinfobot).
-ADMIN_IDS = [710128753, 8905096909]
-
-router = Router()
 
 
 # ---------- Состояния диалогов (FSM) ----------
@@ -66,19 +68,23 @@ class MoodAfter(StatesGroup):
 class LogError(StatesGroup):
     kind = State()
     category = State()
-    who = State()       # ← НОВОЕ: шаг "кто это сказал"
+    who = State()
     text = State()
     correction = State()
 
 
 class Feedback(StatesGroup):
-    waiting = State()   # ← НОВОЕ: ждём текст фидбека
+    waiting = State()
 
 
-# ---------- Вспомогательные функции для клавиатур ----------
+class Quiz(StatesGroup):
+    answering = State()
+
+
+# ---------- Клавиатуры ----------
 
 def back_row():
-    """Одна кнопка Назад. На первом шаге диалога работает как выход в меню."""
+    """Одна кнопка Назад. На первом шаге работает как выход в меню."""
     return [
         InlineKeyboardButton(text="◀️ Назад", callback_data="back"),
     ]
@@ -159,7 +165,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-# ---------- Функции для отправки вопросов ----------
+# ---------- Функции отправки вопросов ----------
 
 async def ask_mood_before_anxiety(message: Message, state: FSMContext):
     await state.set_state(MoodBefore.anxiety)
@@ -212,11 +218,9 @@ async def ask_log_error_category(message: Message, state: FSMContext):
 
 
 async def ask_log_error_who(message: Message, state: FSMContext):
-    """Шаг "Кто это сказал?" — админ вводит @username участника или "аноним"."""
     await state.set_state(LogError.who)
     await message.answer(
-        "Кто это сказал? Введи @username участника (например, @ivan) "
-        "или напиши «аноним»:",
+        "Кто это сказал? Введи @username участника (например, @ivan) или «аноним»:",
         reply_markup=back_inline_keyboard(),
     )
 
@@ -241,7 +245,6 @@ async def ask_log_error_correction(message: Message, state: FSMContext):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    # Сохраняем пользователя в базу — чтобы админ мог найти его по @username
     await db.save_user(
         user_id=message.from_user.id,
         username=message.from_user.username,
@@ -299,16 +302,10 @@ async def feedback_start(message: Message, state: FSMContext):
 
 @router.message(Feedback.waiting)
 async def feedback_receive(message: Message, state: FSMContext):
-    # Проверяем нажатия кнопок (на случай, если пользователь нажал Назад/Отмена)
     if message.text == "◀️ Назад":
         await back_handler_logic(message, state)
         return
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("Отменено.", reply_markup=main_menu_keyboard())
-        return
 
-    # Пересылаем фидбек всем админам
     sent = 0
     for admin_id in ADMIN_IDS:
         try:
@@ -339,18 +336,18 @@ async def feedback_receive(message: Message, state: FSMContext):
 async def my_errors(message: Message):
     rows = await db.get_user_errors(message.from_user.id, limit=5)
     if not rows:
-        await message.answer("Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂")
+        await message.answer(
+            "Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂"
+        )
         return
 
-    # Показываем список последних ошибок
     lines = ["Вот твои последние ошибки:\n"]
     for row in rows:
         kind_label = "оговорка" if row["kind"] == "mistake" else "системная"
         lines.append(f"• [{row['category']}, {kind_label}] «{row['error_text']}» → «{row['correction_text']}»")
-    
+
     await message.answer("\n".join(lines))
 
-        # Если ошибок 3 и больше — генерируем персональный разбор от LLM
     all_errors = await db.get_all_user_errors(message.from_user.id)
     if len(all_errors) >= 3:
         await message.answer("🧠 Генерирую персональный разбор... Это займет несколько секунд.")
@@ -364,70 +361,6 @@ async def my_errors(message: Message):
         await message.answer(
             "Пройди ещё несколько встреч — и я смогу дать персональный разбор твоих ошибок! 🐞"
         )
-
-
-# ---------- Упражнения ----------
-
-@router.message(F.text == "🏋️ Упражнения")
-async def exercises(message: Message):
-    rows = await db.get_all_user_errors(message.from_user.id)
-    if not rows:
-        await message.answer(
-            "Пока не зафиксировано ни одной твоей ошибки. "
-            "После первых встреч я смогу составить для тебя упражнения! 🐞"
-        )
-        return
-
-    if len(rows) < 3:
-        await message.answer(
-            f"Нужно хотя бы 3 ошибки, чтобы я составил упражнения. "
-            f"Сейчас у тебя их {len(rows)}. Продолжай заниматься! 🐞"
-        )
-        return
-
-    await message.answer("🏋️ Готовлю персональные упражнения... Это займёт несколько секунд.")
-    text = await llm.generate_exercises(rows)
-    if text:
-        for part in split_message(f"🏋️ Упражнения от Багси:\n\n{text}"):
-            await message.answer(part)
-    else:
-        await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
-
-
-@router.message(Command("stats"))
-async def stats(message: Message):
-    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
-        return
-
-    session_id = await db.get_current_session_id()
-    if session_id is None:
-        await message.answer("Нет активной встречи. Открой её командой /new_session.")
-        return
-
-    mood = await db.get_mood_stats()
-    top_cats = await db.get_top_error_categories()
-    users_count = await db.get_total_users_count()
-
-    lines = [f"📊 Статистика по встрече #{session_id}\n"]
-    lines.append(f"👥 Всего в базе: {users_count}")
-
-    if mood:
-        before = mood["before"]
-        after = mood["after"]
-        lines.append(f"\n📝 Прошли тест «до»: {before['cnt']}")
-        if before["cnt"] > 0:
-            lines.append(f"   Средняя тревога: {before['avg_anxiety']:.1f}")
-            lines.append(f"   Средний страх осуждения: {before['avg_fear']:.1f}")
-        lines.append(f"📝 Прошли тест «после»: {after['cnt']}")
-        if after["cnt"] > 0:
-            lines.append(f"   Средняя тревога: {after['avg_anxiety']:.1f}")
-
-    if top_cats:
-        lines.append("\n🏆 Топ категорий ошибок:")
-        for i, row in enumerate(top_cats, 1):
-            lines.append(f"   {i}. {row['category']} — {row['cnt']}")
-
-    await message.answer("\n".join(lines))
 
 
 # ---------- Тест настроения ----------
@@ -514,6 +447,99 @@ async def mood_after_self_corrected(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+# ---------- Интерактивные упражнения (Quiz) ----------
+
+@router.message(F.text == "🏋️ Упражнения")
+async def quiz_start(message: Message, state: FSMContext):
+    rows = await db.get_all_user_errors(message.from_user.id)
+    if not rows:
+        await message.answer(
+            "Пока не зафиксировано ни одной твоей ошибки. "
+            "После первых встреч я смогу составить для тебя упражнения! 🐞"
+        )
+        return
+
+    if len(rows) < 3:
+        await message.answer(
+            f"Нужно хотя бы 3 ошибки, чтобы я составил упражнения. "
+            f"Сейчас у тебя их {len(rows)}. Продолжай заниматься! 🐞"
+        )
+        return
+
+    await message.answer("🏋️ Готовлю персональные упражнения... Это займёт несколько секунд.")
+    questions = await llm.generate_quiz(rows)
+    if not questions:
+        await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
+        return
+
+    await state.set_state(Quiz.answering)
+    await state.update_data(questions=questions, current=0, score=0)
+    await send_quiz_question(message, state)
+
+
+async def send_quiz_question(message: Message, state: FSMContext):
+    """Отправляет текущий вопрос с инлайн-кнопками вариантов."""
+    data = await state.get_data()
+    questions = data["questions"]
+    current = data["current"]
+    score = data["score"]
+
+    if current >= len(questions):
+        total = len(questions)
+        await state.clear()
+        await message.answer(
+            f"🎉 Упражнения пройдены!\n\n"
+            f"Правильных ответов: {score} из {total}.\n\n"
+            f"Продолжай в том же духе! 🐞"
+        )
+        return
+
+    q = questions[current]
+    buttons = []
+    for i, opt in enumerate(q["options"]):
+        letter = chr(97 + i)  # a, b, c, d
+        buttons.append([
+            InlineKeyboardButton(text=f"{letter}) {opt}", callback_data=f"quiz_{i}")
+        ])
+
+    await message.answer(
+        f"Вопрос {current + 1} из {len(questions)}:\n\n{q['sentence']}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(Quiz.answering, F.data.startswith("quiz_"))
+async def quiz_answer(callback: CallbackQuery, state: FSMContext):
+    chosen = int(callback.data.split("_")[1])
+    data = await state.get_data()
+    questions = data["questions"]
+    current = data["current"]
+    score = data["score"]
+    q = questions[current]
+
+    # Убираем кнопки у старого сообщения, чтобы нельзя было нажать повторно
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if chosen == q["correct_index"]:
+        await callback.message.answer(f"✅ Верно!\n\n{q['explanation']}")
+        score += 1
+    else:
+        correct_letter = chr(97 + q["correct_index"])
+        correct_opt = q["options"][q["correct_index"]]
+        await callback.message.answer(
+            f"❌ Не совсем.\n\n"
+            f"Правильный ответ: {correct_letter}) {correct_opt}\n\n"
+            f"{q['explanation']}"
+        )
+
+    await state.update_data(current=current + 1, score=score)
+    await callback.answer()
+    await send_quiz_question(callback.message, state)
+
+
 # ---------- Admin: новая встреча ----------
 
 @router.message(Command("new_session"))
@@ -529,6 +555,44 @@ async def new_session(message: Message):
         f"Встреча #{session_id} на тему «{topic}» открыта. "
         "Тест настроения теперь доступен."
     )
+
+
+# ---------- Admin: статистика ----------
+
+@router.message(Command("stats"))
+async def stats(message: Message):
+    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
+        return
+
+    session_id = await db.get_current_session_id()
+    if session_id is None:
+        await message.answer("Нет активной встречи. Открой её командой /new_session.")
+        return
+
+    mood = await db.get_mood_stats()
+    top_cats = await db.get_top_error_categories()
+    users_count = await db.get_total_users_count()
+
+    lines = [f"📊 Статистика по встрече #{session_id}\n"]
+    lines.append(f"👥 Всего в базе: {users_count}")
+
+    if mood:
+        before = mood["before"]
+        after = mood["after"]
+        lines.append(f"\n📝 Прошли тест «до»: {before['cnt']}")
+        if before["cnt"] > 0:
+            lines.append(f"   Средняя тревога: {before['avg_anxiety']:.1f}")
+            lines.append(f"   Средний страх осуждения: {before['avg_fear']:.1f}")
+        lines.append(f"📝 Прошли тест «после»: {after['cnt']}")
+        if after["cnt"] > 0:
+            lines.append(f"   Средняя тревога: {after['avg_anxiety']:.1f}")
+
+    if top_cats:
+        lines.append("\n🏆 Топ категорий ошибок:")
+        for i, row in enumerate(top_cats, 1):
+            lines.append(f"   {i}. {row['category']} — {row['cnt']}")
+
+    await message.answer("\n".join(lines))
 
 
 # ---------- Admin: фиксация ошибки ----------
@@ -573,7 +637,6 @@ async def log_error_who(message: Message, state: FSMContext):
         await ask_log_error_text(message, state)
         return
 
-    # Убираем @, если есть
     username = text.lstrip("@")
     user_id = await db.get_user_id_by_username(username)
 
@@ -630,9 +693,11 @@ async def back_handler_logic(message: Message, state: FSMContext):
         "LogError:who": LogError.category,
         "LogError:text": LogError.who,
         "LogError:correction": LogError.text,
+        "Feedback:waiting": None,
     }
-    prev_state = prev_map.get(current)
-    if prev_state is None:
+    prev_state = prev_map.get(current, "not_found")
+
+    if prev_state == "not_found" or prev_state is None:
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
         return
