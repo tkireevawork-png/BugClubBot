@@ -64,7 +64,6 @@ async def init_db():
             "ON CONFLICT (id) DO NOTHING"
         )
 
-        # Новая таблица: здесь храним всех, кто хоть раз нажал /start
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -142,6 +141,7 @@ async def save_error(session_id: int, error_text: str, correction_text: str, cat
 
 
 async def get_user_errors(user_id: int, limit: int = 5):
+    """Последние N ошибок пользователя (для кнопки «Мои ошибки»)."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT error_text, correction_text, category, kind
@@ -154,7 +154,7 @@ async def get_user_errors(user_id: int, limit: int = 5):
 
 
 async def get_all_user_errors(user_id: int):
-    """Возвращает ВСЕ ошибки пользователя (для LLM-дайджеста)."""
+    """Возвращает ВСЕ ошибки пользователя (для LLM-дайджеста и упражнений)."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT error_text, correction_text, category, kind
@@ -163,3 +163,68 @@ async def get_all_user_errors(user_id: int):
             ORDER BY id DESC
         """, user_id)
         return rows
+
+
+async def get_current_session_topic():
+    """Возвращает тему текущей активной встречи (для «Анонсов»)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT s.topic FROM sessions s
+            JOIN current_session cs ON cs.session_id = s.id
+            WHERE cs.id = 1
+        """)
+        return row["topic"] if row else None
+
+
+async def get_mood_stats():
+    """Статистика теста настроения за текущую встречу (для /stats)."""
+    session_id = await get_current_session_id()
+    if not session_id:
+        return None
+
+    async with pool.acquire() as conn:
+        before = await conn.fetchrow("""
+            SELECT
+                COUNT(*) as cnt,
+                COALESCE(AVG(anxiety_score), 0)::float as avg_anxiety,
+                COALESCE(AVG(fear_of_judgment_score), 0)::float as avg_fear
+            FROM mood_log
+            WHERE session_id = $1 AND stage = 'before'
+        """, session_id)
+
+        after = await conn.fetchrow("""
+            SELECT
+                COUNT(*) as cnt,
+                COALESCE(AVG(anxiety_score), 0)::float as avg_anxiety
+            FROM mood_log
+            WHERE session_id = $1 AND stage = 'after'
+        """, session_id)
+
+        return {
+            "before": dict(before),
+            "after": dict(after),
+        }
+
+
+async def get_top_error_categories(limit: int = 3):
+    """Топ-N категорий ошибок за текущую встречу (для /stats)."""
+    session_id = await get_current_session_id()
+    if not session_id:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT category, COUNT(*) as cnt
+            FROM errors_log
+            WHERE session_id = $1
+            GROUP BY category
+            ORDER BY cnt DESC
+            LIMIT $2
+        """, session_id, limit)
+        return rows
+
+
+async def get_total_users_count():
+    """Всего пользователей в базе (нажимали /start)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM users")
+        return row["cnt"] if row else 0

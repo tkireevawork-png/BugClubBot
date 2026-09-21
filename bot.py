@@ -60,15 +60,15 @@ class Feedback(StatesGroup):
 
 # ---------- Вспомогательные функции для клавиатур ----------
 
-def back_cancel_row():
+def back_row():
+    """Одна кнопка Назад. На первом шаге диалога работает как выход в меню."""
     return [
         InlineKeyboardButton(text="◀️ Назад", callback_data="back"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel"),
     ]
 
 
-def back_cancel_inline_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[back_cancel_row()])
+def back_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[back_row()])
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -76,8 +76,8 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="📅 Анонсы"), KeyboardButton(text="🐞 О Багси")],
             [KeyboardButton(text="📊 Тест настроения")],
-            [KeyboardButton(text="📝 Мои ошибки"), KeyboardButton(text="🎤 Обратная связь")],
-            [KeyboardButton(text="ℹ️ О клубе")],
+            [KeyboardButton(text="📝 Мои ошибки"), KeyboardButton(text="🏋️ Упражнения")],
+            [KeyboardButton(text="🎤 Обратная связь"), KeyboardButton(text="ℹ️ О клубе")],
         ],
         resize_keyboard=True,
     )
@@ -88,7 +88,7 @@ def scale_1_10_keyboard(prefix: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=str(n), callback_data=f"{prefix}_{n}")
         for n in range(1, 11)
     ]
-    rows = [buttons[0:5], buttons[5:10], back_cancel_row()]
+    rows = [buttons[0:5], buttons[5:10], back_row()]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -98,7 +98,7 @@ def before_after_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="До встречи", callback_data="mood_before"),
             InlineKeyboardButton(text="После встречи", callback_data="mood_after"),
         ],
-        back_cancel_row(),
+        back_row(),
     ])
 
 
@@ -108,7 +108,7 @@ def emotion_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="😐 Нейтрально", callback_data="emotion_neutral")],
         [InlineKeyboardButton(text="🤔 Любопытно", callback_data="emotion_curious")],
         [InlineKeyboardButton(text="😎 Горжусь, что рискнул(а)", callback_data="emotion_proud")],
-        back_cancel_row(),
+        back_row(),
     ])
 
 
@@ -117,7 +117,7 @@ def self_correction_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Да, заметил(а) сам(а)", callback_data="selfcorrect_yes")],
         [InlineKeyboardButton(text="Нет", callback_data="selfcorrect_no")],
         [InlineKeyboardButton(text="Ошибок не было", callback_data="selfcorrect_none")],
-        back_cancel_row(),
+        back_row(),
     ])
 
 
@@ -127,7 +127,7 @@ def kind_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Mistake (оговорка)", callback_data="kind_mistake"),
             InlineKeyboardButton(text="Error (системная)", callback_data="kind_error"),
         ],
-        back_cancel_row(),
+        back_row(),
     ])
 
 
@@ -138,7 +138,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Vocabulary", callback_data="cat_vocabulary"),
             InlineKeyboardButton(text="Pronunciation", callback_data="cat_pronunciation"),
         ],
-        back_cancel_row(),
+        back_row(),
     ])
 
 
@@ -200,7 +200,7 @@ async def ask_log_error_who(message: Message, state: FSMContext):
     await message.answer(
         "Кто это сказал? Введи @username участника (например, @ivan) "
         "или напиши «аноним»:",
-        reply_markup=back_cancel_inline_keyboard(),
+        reply_markup=back_inline_keyboard(),
     )
 
 
@@ -208,7 +208,7 @@ async def ask_log_error_text(message: Message, state: FSMContext):
     await state.set_state(LogError.text)
     await message.answer(
         "Напиши, как сказал участник:",
-        reply_markup=back_cancel_inline_keyboard(),
+        reply_markup=back_inline_keyboard(),
     )
 
 
@@ -216,7 +216,7 @@ async def ask_log_error_correction(message: Message, state: FSMContext):
     await state.set_state(LogError.correction)
     await message.answer(
         "А как правильно?",
-        reply_markup=back_cancel_inline_keyboard(),
+        reply_markup=back_inline_keyboard(),
     )
 
 
@@ -239,10 +239,11 @@ async def cmd_start(message: Message):
 
 @router.message(F.text == "📅 Анонсы")
 async def show_announcements(message: Message):
-    await message.answer(
-        "Ближайшая встреча: 11 октября в 18:00. "
-        "Тема: Starting from Scratch"
-    )
+    topic = await db.get_current_session_topic()
+    if topic:
+        await message.answer(f"Ближайшая встреча.\nТема: {topic}")
+    else:
+        await message.answer("Пока нет активной встречи. Следи за обновлениями! 🐞")
 
 
 @router.message(F.text == "ℹ️ О клубе")
@@ -275,7 +276,7 @@ async def feedback_start(message: Message, state: FSMContext):
     await state.set_state(Feedback.waiting)
     await message.answer(
         "Напиши свой анонимный фидбек о встрече одним сообщением — я передам его модератору.",
-        reply_markup=back_cancel_inline_keyboard(),
+        reply_markup=back_inline_keyboard(),
     )
 
 
@@ -345,6 +346,69 @@ async def my_errors(message: Message):
         await message.answer(
             "Пройди ещё несколько встреч — и я смогу дать персональный разбор твоих ошибок! 🐞"
         )
+
+
+# ---------- Упражнения ----------
+
+@router.message(F.text == "🏋️ Упражнения")
+async def exercises(message: Message):
+    rows = await db.get_all_user_errors(message.from_user.id)
+    if not rows:
+        await message.answer(
+            "Пока не зафиксировано ни одной твоей ошибки. "
+            "После первых встреч я смогу составить для тебя упражнения! 🐞"
+        )
+        return
+
+    if len(rows) < 3:
+        await message.answer(
+            f"Нужно хотя бы 3 ошибки, чтобы я составил упражнения. "
+            f"Сейчас у тебя их {len(rows)}. Продолжай заниматься! 🐞"
+        )
+        return
+
+    await message.answer("🏋️ Готовлю персональные упражнения... Это займёт несколько секунд.")
+    text = await llm.generate_exercises(rows)
+    if text:
+        await message.answer(f"🏋️ *Упражнения от Багси:*\n\n{text}", parse_mode="Markdown")
+    else:
+        await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
+
+
+@router.message(Command("stats"))
+async def stats(message: Message):
+    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
+        return
+
+    session_id = await db.get_current_session_id()
+    if session_id is None:
+        await message.answer("Нет активной встречи. Открой её командой /new_session.")
+        return
+
+    mood = await db.get_mood_stats()
+    top_cats = await db.get_top_error_categories()
+    users_count = await db.get_total_users_count()
+
+    lines = [f"📊 Статистика по встрече #{session_id}\n"]
+    lines.append(f"👥 Всего в базе: {users_count}")
+
+    if mood:
+        before = mood["before"]
+        after = mood["after"]
+        lines.append(f"\n📝 Прошли тест «до»: {before['cnt']}")
+        if before["cnt"] > 0:
+            lines.append(f"   Средняя тревога: {before['avg_anxiety']:.1f}")
+            lines.append(f"   Средний страх осуждения: {before['avg_fear']:.1f}")
+        lines.append(f"📝 Прошли тест «после»: {after['cnt']}")
+        if after["cnt"] > 0:
+            lines.append(f"   Средняя тревога: {after['avg_anxiety']:.1f}")
+
+    if top_cats:
+        lines.append("\n🏆 Топ категорий ошибок:")
+        for i, row in enumerate(top_cats, 1):
+            lines.append(f"   {i}. {row['category']} — {row['cnt']}")
+
+    await message.answer("\n".join(lines))
 
 
 # ---------- Тест настроения ----------
@@ -499,7 +563,7 @@ async def log_error_who(message: Message, state: FSMContext):
             f"Не нашёл участника @{username} в базе. "
             "Убедись, что он хотя бы раз запускал бота (/start), "
             "или напиши «аноним».",
-            reply_markup=back_cancel_inline_keyboard(),
+            reply_markup=back_inline_keyboard(),
         )
         return
 

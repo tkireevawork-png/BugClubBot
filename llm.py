@@ -55,11 +55,58 @@ async def generate_digest(errors: list) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=800,      # ← увеличили, чтобы ответ не обрывался
+            max_tokens=800,
             temperature=0.7,
         )
         logging.info(f"Успех. Модель: {response.model}")
         return response.choices[0].message.content
     except Exception as e:
         logging.error(f"Ошибка при запросе к Ranvik: {e}")
+        return None
+
+
+async def generate_exercises(errors: list) -> str:
+    """Составляет персональные упражнения на основе ошибок ученика."""
+    if not os.getenv("RANVIK_API_KEY"):
+        logging.error("RANVIK_API_KEY не задан")
+        return None
+
+    errors_text = ""
+    for i, row in enumerate(errors, 1):
+        kind_label = "оговорка" if row["kind"] == "mistake" else "системная"
+        errors_text += (
+            f"{i}. [{row['category']}, {kind_label}] "
+            f"Сказал: «{row['error_text']}» → Правильно: «{row['correction_text']}»\n"
+        )
+
+    system_prompt = (
+        "Ты — Багси 🐞, опытный преподаватель английского языка. "
+        "Составь для ученика персональные упражнения на основе его ошибок. "
+        "ПРАВИЛА:\n"
+        "1. Создай ровно 3 упражнения, каждое — на одну из ошибок ученика.\n"
+        "2. Типы упражнений:\n"
+        "   • Выбор правильного варианта (a/b/c/d)\n"
+        "   • Раскрыть скобки, поставив глагол в нужную форму\n"
+        "   • Перевести предложение с русского на английский\n"
+        "3. Пиши на русском, дружелюбно, с эмодзи.\n"
+        "4. ПОСЛЕ упражнений напиши блок «✅ Ответы» с правильными ответами.\n"
+        "5. Не обрывай мысль на полуслове. Объём — 10-15 предложений."
+    )
+
+    user_prompt = f"Ошибки ученика:\n\n{errors_text}\n\nСоставь персональные упражнения."
+
+    try:
+        response = await client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=1000,
+            temperature=0.7,
+        )
+        logging.info(f"Упражнения сгенерированы. Модель: {response.model}")
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Ошибка при генерации упражнений: {e}")
         return None
