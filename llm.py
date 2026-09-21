@@ -11,18 +11,32 @@ client = AsyncOpenAI(
     base_url="https://api.ranvik.ru/v1"
 )
 
-MODEL = "deepseek-v4-flash"
+MODEL = "deepseek-flash"
+
+
+def extract_text(response) -> str:
+    """
+    Достаёт текст ответа. Учитывает особенность reasoning-моделей:
+    иногда текст лежит в reasoning_content, а content пустой.
+    """
+    choice = response.choices[0]
+    content = choice.message.content or ""
+    # Fallback на reasoning_content, если он есть
+    reasoning = getattr(choice.message, "reasoning_content", None) or ""
+    result = content.strip() if content.strip() else reasoning.strip()
+    logging.info(
+        f"LLM ответ: content={len(content)} символов, "
+        f"reasoning={len(reasoning)} символов, итог={len(result)} символов"
+    )
+    return result
 
 
 async def generate_digest(errors: list) -> str:
-    """
-    Принимает список ошибок и возвращает персональный разбор от LLM.
-    """
+    """Принимает список ошибок и возвращает персональный разбор от LLM."""
     if not os.getenv("RANVIK_API_KEY"):
         logging.error("RANVIK_API_KEY не задан в переменных окружения")
         return None
 
-    # Собираем ошибки в текст для промпта
     errors_text = ""
     for i, row in enumerate(errors, 1):
         kind_label = "оговорка" if row["kind"] == "mistake" else "системная"
@@ -59,7 +73,7 @@ async def generate_digest(errors: list) -> str:
             temperature=0.7,
         )
         logging.info(f"Успех. Модель: {response.model}")
-        return response.choices[0].message.content
+        return extract_text(response) or None
     except Exception as e:
         logging.error(f"Ошибка при запросе к Ranvik: {e}")
         return None
@@ -102,11 +116,11 @@ async def generate_exercises(errors: list) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=1000,
+            max_tokens=1500,     # ← увеличили, чтобы модель успевала завершить
             temperature=0.7,
         )
         logging.info(f"Упражнения сгенерированы. Модель: {response.model}")
-        return response.choices[0].message.content
+        return extract_text(response) or None
     except Exception as e:
         logging.error(f"Ошибка при генерации упражнений: {e}")
         return None

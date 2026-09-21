@@ -339,7 +339,7 @@ async def my_errors(message: Message):
         await message.answer("🧠 Генерирую персональный разбор... Это займет несколько секунд.")
         digest = await llm.generate_digest(all_errors)
         if digest:
-            await message.answer(f"🐞 *Разбор от Багси:*\n\n{digest}", parse_mode="Markdown")
+            await message.answer(f"🐞 Разбор от Багси:\n\n{digest}")
         else:
             await message.answer("Не удалось сгенерировать разбор. Попробуй позже.")
     else:
@@ -370,7 +370,7 @@ async def exercises(message: Message):
     await message.answer("🏋️ Готовлю персональные упражнения... Это займёт несколько секунд.")
     text = await llm.generate_exercises(rows)
     if text:
-        await message.answer(f"🏋️ *Упражнения от Багси:*\n\n{text}", parse_mode="Markdown")
+        await message.answer(f"🏋️ Упражнения от Багси:\n\n{text}")
     else:
         await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
 
