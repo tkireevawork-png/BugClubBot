@@ -1,27 +1,29 @@
 """
-llm.py — работа с LLM через прямое API DeepSeek.
+llm.py — работа с LLM через российский агрегатор Ranvik API.
 """
 
 import os
 import logging
 from openai import AsyncOpenAI
 
-# Инициализируем клиент OpenAI, но указываем ему адрес DeepSeek
+# Ranvik API полностью совместим с OpenAI SDK.
+# Меняем только base_url и ключ — код остаётся прежним.
 client = AsyncOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com"
+    api_key=os.getenv("RANVIK_API_KEY"),
+    base_url="https://api.ranvik.ru/v1"
 )
 
-# Модель для анализа. deepseek-chat — это актуальная версия.
-MODEL = "deepseek-chat"
+# Название модели. Можно посмотреть в каталоге: api.ranvik.ru/models
+# deepseek-v4-flash — быстрая и дешёвая, хорошо подходит для анализа.
+MODEL = "deepseek-v4-flash"
 
 
 async def generate_digest(errors: list) -> str:
     """
-    Принимает список ошибок и возвращает персональный разбор от DeepSeek.
+    Принимает список ошибок и возвращает персональный разбор от LLM.
     """
-    if not os.getenv("DEEPSEEK_API_KEY"):
-        logging.error("DEEPSEEK_API_KEY не задан в переменных окружения")
+    if not os.getenv("RANVIK_API_KEY"):
+        logging.error("RANVIK_API_KEY не задан в переменных окружения")
         return None
 
     # Собираем ошибки в текст для промпта
@@ -57,5 +59,5 @@ async def generate_digest(errors: list) -> str:
         logging.info(f"Успех. Модель: {response.model}")
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Ошибка при запросе к DeepSeek: {e}")
+        logging.error(f"Ошибка при запросе к Ranvik: {e}")
         return None
