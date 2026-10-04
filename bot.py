@@ -81,6 +81,10 @@ class Quiz(StatesGroup):
     answering = State()
     waiting_for_text = State()
 
+class Registration(StatesGroup):
+    name = State()
+    level = State()
+    motivation = State()
 
 # ---------- Клавиатуры ----------
 
@@ -96,7 +100,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📅 Анонсы"), KeyboardButton(text="🐞 О Багси")],
-            [KeyboardButton(text="📊 Тест настроения")],
+            [KeyboardButton(text="📊 Тест настроения"), KeyboardButton(text="📝 Записаться")],
             [KeyboardButton(text="📝 Мои ошибки"), KeyboardButton(text="🏋️ Упражнения")],
             [KeyboardButton(text="🎤 Обратная связь"), KeyboardButton(text="ℹ️ О клубе")],
         ],
@@ -245,16 +249,29 @@ async def cmd_start(message: Message):
 @router.message(F.text == "📅 Анонсы")
 async def show_announcements(message: Message):
     topic = await db.get_current_session_topic()
-    if topic:
-        await message.answer(f"Ближайшая встреча.\nТема: {topic}")
-    else:
+    if not topic:
         await message.answer("Пока нет активной встречи. Следи за обновлениями! 🐞")
+        return
+    is_first = await db.get_current_session_is_first()
+    header = "🎉 Первая встреча BugClub" if is_first else "Ближайшая встреча"
+    await message.answer(f"{header}\n\n{topic}")
 
 
 @router.message(F.text == "ℹ️ О клубе")
 async def about(message: Message):
     await message.answer(
-        "BugClub — место, где можно ошибаться на английском и не бояться этого."
+        "🐞 Привет! Это BugClub!\n\n"
+        "💡 Место, где можно говорить на английском и ошибаться без страха и без осуждения\n\n"
+        "🎀 Мы знаем, как это бывает: вроде знаешь язык, а надо сказать вслух и... теряешься.\n"
+        "Или молчишь, чтобы не показаться глупым.\n"
+        "Или хочется ответить, но вдруг неправильно?\n\n"
+        "🌧 Это нормально, и это не про тебя одного.\n\n"
+        "☀️ BugClub — разговорный клуб, построенный вокруг простой идеи: "
+        "ошибка — не провал, а часть процесса. Нас ждут живые разговоры и дебаты "
+        "на темы, которые реально интересно обсуждать.\n\n"
+        "Бережный разбор того, что не получилось с первого раза и ноль (!!!) осуждения.\n\n"
+        "🌷 Дальше расскажем, кто ведёт у нас учёт этих самых ошибок "
+        "(спойлер: она маленькая, красная и в чёрный горошек))"
     )
 
 
@@ -269,6 +286,72 @@ async def about_bagsy(message: Message):
         ),
     )
 
+# ---------- Регистрация на встречу ----------
+
+@router.message(F.text == "📝 Записаться")
+async def registration_start(message: Message, state: FSMContext):
+    await state.set_state(Registration.name)
+    await message.answer(
+        "Отлично! Давай запишем тебя на встречу 📝\n\n"
+        "Как тебя зовут? (имя или ник)"
+    )
+
+
+@router.message(Registration.name)
+async def registration_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text.strip())
+    await state.set_state(Registration.level)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="A1–A2 (начальный)", callback_data="lvl_A1-A2")],
+        [InlineKeyboardButton(text="B1–B2 (средний)", callback_data="lvl_B1-B2")],
+        [InlineKeyboardButton(text="C1+ (продвинутый)", callback_data="lvl_C1+")],
+        [InlineKeyboardButton(text="Пока не знаю", callback_data="lvl_unknown")],
+        back_row(),
+    ])
+    await message.answer("Какой у тебя уровень английского?", reply_markup=kb)
+
+
+@router.callback_query(Registration.level, F.data.startswith("lvl_"))
+async def registration_level(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(level=cb.data.replace("lvl_", ""))
+    await state.set_state(Registration.motivation)
+    await cb.message.answer(
+        "И последнее: что ты хочешь получить от клуба? "
+        "Напиши пару предложений — что тебя беспокоит, чего хочешь достичь, о чём мечтаешь говорить 🐞"
+    )
+    await cb.answer()
+
+
+@router.message(Registration.motivation)
+async def registration_motivation(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await db.save_registration(
+        user_id=message.from_user.id,
+        name=data["name"],
+        level=data["level"],
+        motivation=message.text.strip(),
+    )
+    await state.clear()
+    await message.answer(
+        f"🎉 {data['name']}, ты записан(а) на встречу!\n\n"
+        "Мы пришлём напоминание за день до встречи. "
+        "До встречи в BugClub! 🐞",
+        reply_markup=main_menu_keyboard(),
+    )
+
+    # Уведомляем админов
+    for admin_id in ADMIN_IDS:
+        try:
+            await message.bot.send_message(
+                admin_id,
+                f"📝 Новая запись на встречу:\n\n"
+                f"👤 {data['name']} (@{message.from_user.username or 'без username'})\n"
+                f"📊 Уровень: {data['level']}\n"
+                f"💬 Цель: {message.text}"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 # ---------- Обратная связь ----------
 
@@ -343,7 +426,21 @@ async def mood_test_start(message: Message):
     if await db.get_current_session_id() is None:
         await message.answer("Пока нет активной встречи — тест откроется, когда модератор начнёт сессию.")
         return
-    await message.answer("Это тест до встречи или после?", reply_markup=before_after_keyboard())
+
+    is_first = await db.get_current_session_is_first()
+    if is_first:
+        await message.answer(
+            "🌟 Это твой первый тест настроения в BugClub!\n\n"
+            "Отвечай честно, ведь здесь нет правильных или неправильных ответов. "
+            "Тест покажет, как меняется твоё состояние до и после встречи.\n\n"
+            "Это тест до встречи или после?",
+            reply_markup=before_after_keyboard(),
+        )
+    else:
+        await message.answer(
+            "Это тест до встречи или после?",
+            reply_markup=before_after_keyboard(),
+        )
 
 
 @router.callback_query(F.data == "mood_before")
@@ -539,7 +636,43 @@ async def new_session(message: Message):
     sid = await db.start_new_session(topic)
     await message.answer(f"Встреча #{sid} на тему «{topic}» открыта.")
 
+@router.message(Command("new_session_first"))
+async def new_session_first(message: Message):
+    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
+        return
+    topic = message.text.replace("/new_session_first", "").strip()
+    if not topic:
+        await message.answer("Формат: /new_session_first Тема первой встречи")
+        return
+    sid = await db.start_first_session(topic)
+    await message.answer(
+        f"🎉 Первая встреча #{sid} открыта!\n"
+        f"Тема: «{topic}»\n\n"
+        "Тест настроения теперь доступен с особым приветствием."
+    )
 
+
+@router.message(Command("registrations"))
+async def registrations(message: Message):
+    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
+        return
+    rows = await db.get_all_registrations()
+    if not rows:
+        await message.answer("Пока никто не записался.")
+        return
+
+    lines = [f"📝 Записи на встречу ({len(rows)}):\n"]
+    for i, r in enumerate(rows, 1):
+        uname = f"@{r['username']}" if r["username"] else "без username"
+        lines.append(
+            f"{i}. {r['name']} ({uname})\n"
+            f"   Уровень: {r['level']}\n"
+            f"   Цель: {r['motivation'][:100]}{'...' if len(r['motivation']) > 100 else ''}\n"
+        )
+    text = "\n".join(lines)
+    for part in split_message(text):
+        await message.answer(part)
+        
 # ---------- Админ: закрытие встречи с дайджестом ----------
 
 @router.message(Command("close_session"))
