@@ -1,5 +1,6 @@
 """
-BugClub bot — финальная версия: PostgreSQL, LLM, квиз, экспорт, лимиты, дайджест.
+BugClub bot — финальная версия: PostgreSQL, LLM, квиз, экспорт, лимиты, дайджест,
+форма регистрации с привязкой к встрече и рассылка материалов /broadcast.
 """
 
 import asyncio
@@ -23,6 +24,7 @@ from aiogram.types import (
 
 import db
 import llm
+
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -36,7 +38,6 @@ router = Router()
 # ---------- Вспомогательные ----------
 
 def split_message(text: str, limit: int = 4000):
-    """Режет длинный текст на куски по limit символов."""
     if len(text) <= limit:
         return [text]
     parts = []
@@ -81,10 +82,16 @@ class Quiz(StatesGroup):
     answering = State()
     waiting_for_text = State()
 
+
 class Registration(StatesGroup):
     name = State()
     level = State()
     motivation = State()
+
+
+class Broadcast(StatesGroup):
+    confirming = State()
+
 
 # ---------- Клавиатуры ----------
 
@@ -156,6 +163,16 @@ def category_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Grammar", callback_data="cat_grammar"),
          InlineKeyboardButton(text="Vocabulary", callback_data="cat_vocabulary"),
          InlineKeyboardButton(text="Pronunciation", callback_data="cat_pronunciation")],
+        back_row(),
+    ])
+
+
+def level_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="A1–A2 (начальный)", callback_data="lvl_A1-A2")],
+        [InlineKeyboardButton(text="B1–B2 (средний)", callback_data="lvl_B1-B2")],
+        [InlineKeyboardButton(text="C1+ (продвинутый)", callback_data="lvl_C1+")],
+        [InlineKeyboardButton(text="Пока не знаю", callback_data="lvl_unknown")],
         back_row(),
     ])
 
@@ -270,6 +287,8 @@ async def about(message: Message):
         "ошибка — не провал, а часть процесса. Нас ждут живые разговоры и дебаты "
         "на темы, которые реально интересно обсуждать.\n\n"
         "Бережный разбор того, что не получилось с первого раза и ноль (!!!) осуждения.\n\n"
+        "🌷 Дальше расскажем, кто ведёт у нас учёт этих самых ошибок "
+        "(спойлер: она маленькая, красная и в чёрный горошек))"
     )
 
 
@@ -284,10 +303,20 @@ async def about_bagsy(message: Message):
         ),
     )
 
+
 # ---------- Регистрация на встречу ----------
 
 @router.message(F.text == "📝 Записаться")
 async def registration_start(message: Message, state: FSMContext):
+    # Проверяем, есть ли активная встреча
+    sid = await db.get_current_session_id()
+    if sid is None:
+        await message.answer(
+            "Регистрация откроется, когда модератор начнёт встречу. "
+            "Следи за анонсами! 🐞"
+        )
+        return
+
     await state.set_state(Registration.name)
     await message.answer(
         "Отлично! Давай запишем тебя на встречу 📝\n\n"
@@ -299,15 +328,7 @@ async def registration_start(message: Message, state: FSMContext):
 async def registration_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(Registration.level)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="A1–A2 (начальный)", callback_data="lvl_A1-A2")],
-        [InlineKeyboardButton(text="B1–B2 (средний)", callback_data="lvl_B1-B2")],
-        [InlineKeyboardButton(text="C1+ (продвинутый)", callback_data="lvl_C1+")],
-        [InlineKeyboardButton(text="Пока не знаю", callback_data="lvl_unknown")],
-        back_row(),
-    ])
-    await message.answer("Какой у тебя уровень английского?", reply_markup=kb)
+    await message.answer("Какой у тебя уровень английского?", reply_markup=level_keyboard())
 
 
 @router.callback_query(Registration.level, F.data.startswith("lvl_"))
@@ -324,11 +345,14 @@ async def registration_level(cb: CallbackQuery, state: FSMContext):
 @router.message(Registration.motivation)
 async def registration_motivation(message: Message, state: FSMContext):
     data = await state.get_data()
+    sid = await db.get_current_session_id()
+
     await db.save_registration(
         user_id=message.from_user.id,
         name=data["name"],
         level=data["level"],
         motivation=message.text.strip(),
+        session_id=sid,
     )
     await state.clear()
     await message.answer(
@@ -338,7 +362,6 @@ async def registration_motivation(message: Message, state: FSMContext):
         reply_markup=main_menu_keyboard(),
     )
 
-    # Уведомляем админов
     for admin_id in ADMIN_IDS:
         try:
             await message.bot.send_message(
@@ -350,6 +373,7 @@ async def registration_motivation(message: Message, state: FSMContext):
             )
         except Exception as e:
             logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
 
 # ---------- Обратная связь ----------
 
@@ -400,7 +424,6 @@ async def my_errors(message: Message):
 
     all_errors = await db.get_all_user_errors(message.from_user.id)
     if len(all_errors) >= 3:
-        # Rate limit: раз в 5 минут
         if not await db.check_rate_limit(message.from_user.id, "digest", minutes=5):
             await message.answer("⏳ Разбор можно запрашивать раз в 5 минут. Попробуй позже.")
             return
@@ -428,8 +451,8 @@ async def mood_test_start(message: Message):
     is_first = await db.get_current_session_is_first()
     if is_first:
         await message.answer(
-            "🌟 Это твой первый тест настроения в BugClub!\n\n"
-            "Отвечай честно, ведь здесь нет правильных или неправильных ответов. "
+            "🌟 Это твой ПЕРВЫЙ тест настроения в BugClub!\n\n"
+            "Ответь честно — здесь нет правильных или неправильных ответов. "
             "Тест покажет, как меняется твоё состояние до и после встречи.\n\n"
             "Это тест до встречи или после?",
             reply_markup=before_after_keyboard(),
@@ -634,6 +657,7 @@ async def new_session(message: Message):
     sid = await db.start_new_session(topic)
     await message.answer(f"Встреча #{sid} на тему «{topic}» открыта.")
 
+
 @router.message(Command("new_session_first"))
 async def new_session_first(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
@@ -650,27 +674,157 @@ async def new_session_first(message: Message):
     )
 
 
+# ---------- Админ: список регистраций ----------
+
 @router.message(Command("registrations"))
 async def registrations(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    rows = await db.get_all_registrations()
-    if not rows:
-        await message.answer("Пока никто не записался.")
+    sid = await db.get_current_session_id()
+    if sid is None:
+        await message.answer("Нет активной встречи.")
         return
 
-    lines = [f"📝 Записи на встречу ({len(rows)}):\n"]
+    rows = await db.get_registrations_for_session(sid)
+    if not rows:
+        await message.answer("Пока никто не записался на эту встречу.")
+        return
+
+    lines = [f"📝 Записи на текущую встречу ({len(rows)}):\n"]
     for i, r in enumerate(rows, 1):
         uname = f"@{r['username']}" if r["username"] else "без username"
+        mot = r["motivation"] or ""
         lines.append(
             f"{i}. {r['name']} ({uname})\n"
             f"   Уровень: {r['level']}\n"
-            f"   Цель: {r['motivation'][:100]}{'...' if len(r['motivation']) > 100 else ''}\n"
+            f"   Цель: {mot[:100]}{'...' if len(mot) > 100 else ''}\n"
         )
     text = "\n".join(lines)
     for part in split_message(text):
         await message.answer(part)
-        
+
+
+# ---------- Админ: рассылка подготовленных материалов ----------
+
+@router.message(Command("broadcast"))
+async def broadcast_start(message: Message, state: FSMContext):
+    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
+        return
+
+    target = message.reply_to_message
+    if target is None:
+        await message.answer(
+            "📢 Как использовать /broadcast:\n\n"
+            "1. Отправь мне сообщение, которое хочешь разослать "
+            "(текст, фото с подписью или фото без подписи).\n"
+            "2. Ответь на него командой /broadcast.\n"
+            "3. Подтверди отправку.\n\n"
+            "Рассылка уйдёт всем, кто записался на текущую встречу."
+        )
+        return
+
+    sid = await db.get_current_session_id()
+    if sid is None:
+        await message.answer("Нет активной встречи. Сначала открой её /new_session.")
+        return
+
+    # Определяем тип контента
+    if target.photo:
+        content_type = "photo"
+        photo_id = target.photo[-1].file_id
+        caption = target.caption or ""
+        text = None
+    elif target.text:
+        content_type = "text"
+        text = target.text
+        photo_id = None
+        caption = None
+    else:
+        await message.answer("Поддерживаются только текст и фото.")
+        return
+
+    rows = await db.get_registrations_for_session(sid)
+    if not rows:
+        await message.answer("На текущую встречу никто не записался — рассылать некому.")
+        return
+
+    recipients = [r["user_id"] for r in rows]
+
+    await state.update_data(
+        content_type=content_type,
+        text=text,
+        photo_id=photo_id,
+        caption=caption,
+        recipients=recipients,
+    )
+    await state.set_state(Broadcast.confirming)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"✅ Отправить {len(recipients)}", callback_data="bc_yes"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="bc_no"),
+    ]])
+
+    await message.answer(
+        f"📢 Проверь рассылку:\n\n"
+        f"• Тип: {content_type}\n"
+        f"• Получателей: {len(recipients)}\n\n"
+        f"Подтверди отправку:",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(Broadcast.confirming, F.data == "bc_yes")
+async def broadcast_confirm(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    content_type = data["content_type"]
+    recipients = data["recipients"]
+
+    await cb.message.answer(f"📤 Отправляю {len(recipients)} участникам...")
+
+    sent = 0
+    failed = 0
+    for user_id in recipients:
+        try:
+            if content_type == "photo":
+                await cb.bot.send_photo(
+                    user_id,
+                    photo=data["photo_id"],
+                    caption=data["caption"] or None,
+                )
+            else:
+                await cb.bot.send_message(user_id, data["text"])
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            logging.error(f"Broadcast: не отправлено {user_id}: {e}")
+            failed += 1
+
+    await cb.message.answer(
+        f"✅ Рассылка завершена!\n\n"
+        f"📤 Отправлено: {sent}\n"
+        f"❌ Не удалось: {failed}"
+    )
+    await cb.answer()
+
+
+@router.callback_query(Broadcast.confirming, F.data == "bc_no")
+async def broadcast_cancel(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await cb.message.answer("❌ Рассылка отменена.")
+    await cb.answer()
+
+
 # ---------- Админ: закрытие встречи с дайджестом ----------
 
 @router.message(Command("close_session"))
@@ -689,7 +843,6 @@ async def close_session(message: Message):
 
     await db.close_current_session()
 
-    # Сводка
     lines = [f"🔒 Встреча #{sid} «{topic}» закрыта.\n"]
     if mood:
         lines.append(f"📝 Тест «до»: {mood['before']['cnt']}, «после»: {mood['after']['cnt']}")
@@ -703,7 +856,6 @@ async def close_session(message: Message):
 
     await message.answer("\n".join(lines))
 
-    # LLM-дайджест
     if errors:
         await message.answer("🧠 Готовлю педагогический дайджест...")
         digest = await llm.generate_session_digest(errors, topic)
@@ -728,21 +880,36 @@ async def stats(message: Message):
     mood = await db.get_mood_stats()
     top = await db.get_top_error_categories()
     total = await db.get_total_users_count()
+    registrations = await db.get_registrations_for_session(sid)
 
-    lines = [f"📊 Статистика по встрече #{sid}\n", f"👥 Всего в базе: {total}"]
+    lines = [f"📊 Статистика по встрече #{sid}\n"]
+    lines.append(f"👥 Всего в базе: {total}")
+
+    lines.append(f"\n📝 Записались на встречу: {len(registrations)}")
+    if registrations:
+        names = [r["name"] for r in registrations]
+        if len(names) <= 15:
+            lines.append("   " + ", ".join(names))
+        else:
+            lines.append("   " + ", ".join(names[:15]) + f" и ещё {len(names) - 15}")
+
     if mood:
-        lines.append(f"\n📝 Тест «до»: {mood['before']['cnt']}")
+        lines.append(f"\n📈 Тест «до»: {mood['before']['cnt']}")
         if mood["before"]["cnt"] > 0:
             lines.append(f"   Средняя тревога: {mood['before']['avg_anxiety']:.1f}")
             lines.append(f"   Страх осуждения: {mood['before']['avg_fear']:.1f}")
-        lines.append(f"📝 Тест «после»: {mood['after']['cnt']}")
+        lines.append(f"📉 Тест «после»: {mood['after']['cnt']}")
         if mood["after"]["cnt"] > 0:
             lines.append(f"   Средняя тревога: {mood['after']['avg_anxiety']:.1f}")
+
     if top:
         lines.append("\n🏆 Топ ошибок:")
         for i, r in enumerate(top, 1):
             lines.append(f"   {i}. {r['category']} — {r['cnt']}")
-    await message.answer("\n".join(lines))
+
+    text = "\n".join(lines)
+    for part in split_message(text):
+        await message.answer(part)
 
 
 # ---------- Админ: экспорт в CSV ----------
@@ -758,7 +925,6 @@ async def export_data(message: Message):
 
     await message.answer("📦 Готовлю файлы для экспорта...")
 
-    # users.csv
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["user_id", "username", "first_name", "last_interaction"])
@@ -770,7 +936,6 @@ async def export_data(message: Message):
         caption="👥 users.csv",
     )
 
-    # errors.csv
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["id", "user_id", "username", "first_name", "session_topic",
@@ -785,7 +950,6 @@ async def export_data(message: Message):
         caption="🐞 errors.csv",
     )
 
-    # mood.csv
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["id", "user_id", "username", "first_name", "session_topic",
@@ -891,6 +1055,9 @@ async def back_handler_logic(message: Message, state: FSMContext):
         "LogError:text": LogError.who,
         "LogError:correction": LogError.text,
         "Feedback:waiting": None,
+        "Registration:level": Registration.name,
+        "Registration:motivation": Registration.level,
+        "Broadcast:confirming": None,
     }
     prev = prev_map.get(current, "not_found")
     if prev == "not_found" or prev is None:
@@ -911,6 +1078,12 @@ async def back_handler_logic(message: Message, state: FSMContext):
         await ask_log_error_who(message, state)
     elif prev == LogError.text:
         await ask_log_error_text(message, state)
+    elif prev == Registration.name:
+        await state.set_state(Registration.name)
+        await message.answer("Как тебя зовут? (имя или ник)")
+    elif prev == Registration.level:
+        await state.set_state(Registration.level)
+        await message.answer("Какой у тебя уровень английского?", reply_markup=level_keyboard())
     else:
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())

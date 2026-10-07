@@ -97,6 +97,10 @@ async def init_db():
             ALTER TABLE sessions ADD COLUMN IF NOT EXISTS is_first BOOLEAN DEFAULT FALSE
         """)
 
+        await conn.execute("""
+            ALTER TABLE registrations ADD COLUMN IF NOT EXISTS session_id INTEGER
+        """)
+
 
 # ---------- Пользователи ----------
 
@@ -123,28 +127,31 @@ async def get_user_id_by_username(username: str):
 
 # ---------- Регистрация ----------
 
-async def save_registration(user_id: int, name: str, level: str, motivation: str):
+async def save_registration(user_id: int, name: str, level: str, motivation: str, session_id: int):
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO registrations (user_id, name, level, motivation, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO registrations (user_id, name, level, motivation, created_at, session_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (user_id) DO UPDATE
             SET name = EXCLUDED.name,
                 level = EXCLUDED.level,
                 motivation = EXCLUDED.motivation,
-                created_at = EXCLUDED.created_at
-        """, user_id, name, level, motivation, datetime.utcnow())
+                created_at = EXCLUDED.created_at,
+                session_id = EXCLUDED.session_id
+        """, user_id, name, level, motivation, datetime.utcnow(), session_id)
 
 
-async def get_all_registrations():
+async def get_registrations_for_session(session_id: int):
+    """Записавшиеся на конкретную встречу."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT r.user_id, r.name, r.level, r.motivation,
                    u.username, r.created_at
             FROM registrations r
             LEFT JOIN users u ON u.user_id = r.user_id
-            ORDER BY r.created_at DESC
-        """)
+            WHERE r.session_id = $1
+            ORDER BY r.created_at ASC
+        """, session_id)
         return rows
 
 
@@ -164,7 +171,6 @@ async def start_new_session(topic: str) -> int:
 
 
 async def start_first_session(topic: str) -> int:
-    """Создаёт первую встречу с флагом is_first=True."""
     async with pool.acquire() as conn:
         session_id = await conn.fetchval(
             "INSERT INTO sessions (topic, created_at, is_first) VALUES ($1, $2, TRUE) RETURNING id",
@@ -194,7 +200,6 @@ async def get_current_session_topic():
 
 
 async def get_current_session_is_first() -> bool:
-    """True, если текущая встреча помечена как первая."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT s.is_first FROM sessions s
@@ -316,7 +321,6 @@ async def get_total_users_count():
 # ---------- Rate limit для LLM ----------
 
 async def check_rate_limit(user_id: int, action: str, minutes: int = 5) -> bool:
-    """True — можно делать запрос. False — ещё рано."""
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
     async with pool.acquire() as conn:
         count = await conn.fetchval("""
@@ -337,7 +341,6 @@ async def log_llm_usage(user_id: int, action: str):
 # ---------- Экспорт ----------
 
 async def get_all_data_for_export():
-    """Возвращает (users, errors, mood) для экспорта в CSV."""
     async with pool.acquire() as conn:
         users = await conn.fetch("""
             SELECT user_id, username, first_name, last_interaction
