@@ -1,6 +1,5 @@
 """
-BugClub bot — финальная версия: PostgreSQL, LLM, квиз, экспорт, лимиты, дайджест,
-форма регистрации с привязкой к встрече и рассылка материалов /broadcast.
+BugClub bot — финальная версия (SQLite, LLM, квиз, регистрация, рассылка).
 """
 
 import asyncio
@@ -8,7 +7,6 @@ import csv
 import io
 import logging
 import os
-import re
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -53,17 +51,6 @@ def split_message(text: str, limit: int = 4000):
         text = text[cut:].lstrip()
     return parts
 
-def clean_lines(text: str) -> list[str]:
-    """Разбивает текст на строки, убирая пустые строки и нумерацию типа '1. '."""
-    lines = []
-    for line in text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        # Убираем цифры и точки в начале (например "1. ", "1) ", "- ")
-        line = re.sub(r'^[\d\-]+[\.\)]?\s*', '', line)
-        lines.append(line)
-    return lines
 
 # ---------- Состояния ----------
 
@@ -85,12 +72,6 @@ class LogError(StatesGroup):
     text = State()
     correction = State()
 
-class BulkLog(StatesGroup):
-    who = State()
-    category = State()
-    kind = State()
-    errors = State()
-    corrections = State()
 
 class Feedback(StatesGroup):
     waiting = State()
@@ -269,7 +250,7 @@ async def ask_log_error_correction(message, state):
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await db.save_user(
+    db.save_user(
         user_id=message.from_user.id,
         username=message.from_user.username,
         first_name=message.from_user.first_name,
@@ -283,11 +264,11 @@ async def cmd_start(message: Message):
 
 @router.message(F.text == "📅 Анонсы")
 async def show_announcements(message: Message):
-    topic = await db.get_current_session_topic()
+    topic = db.get_current_session_topic()
     if not topic:
         await message.answer("Пока нет активной встречи. Следи за обновлениями! 🐞")
         return
-    is_first = await db.get_current_session_is_first()
+    is_first = db.get_current_session_is_first()
     header = "🎉 Первая встреча BugClub" if is_first else "Ближайшая встреча"
     await message.answer(f"{header}\n\n{topic}")
 
@@ -326,8 +307,7 @@ async def about_bagsy(message: Message):
 
 @router.message(F.text == "📝 Записаться")
 async def registration_start(message: Message, state: FSMContext):
-    # Проверяем, есть ли активная встреча
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
     if sid is None:
         await message.answer(
             "Регистрация откроется, когда модератор начнёт встречу. "
@@ -363,9 +343,9 @@ async def registration_level(cb: CallbackQuery, state: FSMContext):
 @router.message(Registration.motivation)
 async def registration_motivation(message: Message, state: FSMContext):
     data = await state.get_data()
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
 
-    await db.save_registration(
+    db.save_registration(
         user_id=message.from_user.id,
         name=data["name"],
         level=data["level"],
@@ -429,7 +409,7 @@ async def feedback_receive(message: Message, state: FSMContext):
 
 @router.message(F.text == "📝 Мои ошибки")
 async def my_errors(message: Message):
-    rows = await db.get_user_errors(message.from_user.id, limit=5)
+    rows = db.get_user_errors(message.from_user.id, limit=5)
     if not rows:
         await message.answer("Пока не зафиксировано ни одной твоей ошибки — это хороший знак 🙂")
         return
@@ -440,15 +420,15 @@ async def my_errors(message: Message):
         lines.append(f"• [{row['category']}, {kind_label}] «{row['error_text']}» → «{row['correction_text']}»")
     await message.answer("\n".join(lines))
 
-    all_errors = await db.get_all_user_errors(message.from_user.id)
+    all_errors = db.get_all_user_errors(message.from_user.id)
     if len(all_errors) >= 3:
-        if not await db.check_rate_limit(message.from_user.id, "digest", minutes=5):
+        if not db.check_rate_limit(message.from_user.id, "digest", minutes=5):
             await message.answer("⏳ Разбор можно запрашивать раз в 5 минут. Попробуй позже.")
             return
 
         await message.answer("🧠 Генерирую персональный разбор...")
         digest = await llm.generate_digest(all_errors)
-        await db.log_llm_usage(message.from_user.id, "digest")
+        db.log_llm_usage(message.from_user.id, "digest")
         if digest:
             for part in split_message(f"🐞 Разбор от Багси:\n\n{digest}"):
                 await message.answer(part)
@@ -462,11 +442,11 @@ async def my_errors(message: Message):
 
 @router.message(F.text == "📊 Тест настроения")
 async def mood_test_start(message: Message):
-    if await db.get_current_session_id() is None:
+    if db.get_current_session_id() is None:
         await message.answer("Пока нет активной встречи — тест откроется, когда модератор начнёт сессию.")
         return
 
-    is_first = await db.get_current_session_is_first()
+    is_first = db.get_current_session_is_first()
     if is_first:
         await message.answer(
             "🌟 Это твой ПЕРВЫЙ тест настроения в BugClub!\n\n"
@@ -498,8 +478,8 @@ async def mood_before_anxiety(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(MoodBefore.fear, F.data.startswith("fear_"))
 async def mood_before_fear(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    sid = await db.get_current_session_id()
-    await db.save_mood_before(cb.from_user.id, sid, data["anxiety"], int(cb.data.split("_")[1]))
+    sid = db.get_current_session_id()
+    db.save_mood_before(cb.from_user.id, sid, data["anxiety"], int(cb.data.split("_")[1]))
     await state.clear()
     await cb.message.answer("Спасибо! Увидимся на встрече 🐞")
     await cb.answer()
@@ -528,8 +508,8 @@ async def mood_after_emotion(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(MoodAfter.self_corrected, F.data.startswith("selfcorrect_"))
 async def mood_after_self_corrected(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    sid = await db.get_current_session_id()
-    await db.save_mood_after(
+    sid = db.get_current_session_id()
+    db.save_mood_after(
         cb.from_user.id, sid, data["anxiety"],
         data["emotion"], cb.data.split("_")[1],
     )
@@ -542,7 +522,7 @@ async def mood_after_self_corrected(cb: CallbackQuery, state: FSMContext):
 
 @router.message(F.text == "🏋️ Упражнения")
 async def quiz_start(message: Message, state: FSMContext):
-    rows = await db.get_all_user_errors(message.from_user.id)
+    rows = db.get_all_user_errors(message.from_user.id)
     if not rows:
         await message.answer("Пока нет ошибок. После встреч я составлю упражнения! 🐞")
         return
@@ -550,13 +530,13 @@ async def quiz_start(message: Message, state: FSMContext):
         await message.answer(f"Нужно хотя бы 3 ошибки. Сейчас у тебя их {len(rows)}. 🐞")
         return
 
-    if not await db.check_rate_limit(message.from_user.id, "quiz", minutes=5):
+    if not db.check_rate_limit(message.from_user.id, "quiz", minutes=5):
         await message.answer("⏳ Упражнения можно запрашивать раз в 5 минут. Попробуй позже.")
         return
 
     await message.answer("🏋️ Готовлю персональные упражнения...")
     questions = await llm.generate_quiz(rows)
-    await db.log_llm_usage(message.from_user.id, "quiz")
+    db.log_llm_usage(message.from_user.id, "quiz")
     if not questions:
         await message.answer("Не удалось сгенерировать упражнения. Попробуй позже.")
         return
@@ -672,7 +652,7 @@ async def new_session(message: Message):
     if not topic:
         await message.answer("Формат: /new_session Тема сегодняшних дебатов")
         return
-    sid = await db.start_new_session(topic)
+    sid = db.start_new_session(topic)
     await message.answer(f"Встреча #{sid} на тему «{topic}» открыта.")
 
 
@@ -684,7 +664,7 @@ async def new_session_first(message: Message):
     if not topic:
         await message.answer("Формат: /new_session_first Тема первой встречи")
         return
-    sid = await db.start_first_session(topic)
+    sid = db.start_first_session(topic)
     await message.answer(
         f"🎉 Первая встреча открыта!\n"
         f"Тема: «{topic}»\n\n"
@@ -698,19 +678,19 @@ async def new_session_first(message: Message):
 async def registrations(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
     if sid is None:
         await message.answer("Нет активной встречи.")
         return
 
-    rows = await db.get_registrations_for_session(sid)
+    rows = db.get_registrations_for_session(sid)
     if not rows:
         await message.answer("Пока никто не записался на эту встречу.")
         return
 
     lines = [f"📝 Записи на текущую встречу ({len(rows)}):\n"]
     for i, r in enumerate(rows, 1):
-        uname = f"@{r['username']}" if r["username"] else "без username"
+        uname = f"@{r['username']}" if r['username'] else "без username"
         mot = r["motivation"] or ""
         lines.append(
             f"{i}. {r['name']} ({uname})\n"
@@ -722,7 +702,7 @@ async def registrations(message: Message):
         await message.answer(part)
 
 
-# ---------- Админ: рассылка подготовленных материалов ----------
+# ---------- Админ: рассылка ----------
 
 @router.message(Command("broadcast"))
 async def broadcast_start(message: Message, state: FSMContext):
@@ -736,17 +716,15 @@ async def broadcast_start(message: Message, state: FSMContext):
             "1. Отправь мне сообщение, которое хочешь разослать "
             "(текст, фото с подписью или фото без подписи).\n"
             "2. Ответь на него командой /broadcast.\n"
-            "3. Подтверди отправку.\n\n"
-            "Рассылка уйдёт всем, кто записался на текущую встречу."
+            "3. Подтверди отправку."
         )
         return
 
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
     if sid is None:
         await message.answer("Нет активной встречи. Сначала открой её /new_session.")
         return
 
-    # Определяем тип контента
     if target.photo:
         content_type = "photo"
         photo_id = target.photo[-1].file_id
@@ -761,7 +739,7 @@ async def broadcast_start(message: Message, state: FSMContext):
         await message.answer("Поддерживаются только текст и фото.")
         return
 
-    rows = await db.get_registrations_for_session(sid)
+    rows = db.get_registrations_for_session(sid)
     if not rows:
         await message.answer("На текущую встречу никто не записался — рассылать некому.")
         return
@@ -769,11 +747,8 @@ async def broadcast_start(message: Message, state: FSMContext):
     recipients = [r["user_id"] for r in rows]
 
     await state.update_data(
-        content_type=content_type,
-        text=text,
-        photo_id=photo_id,
-        caption=caption,
-        recipients=recipients,
+        content_type=content_type, text=text, photo_id=photo_id,
+        caption=caption, recipients=recipients,
     )
     await state.set_state(Broadcast.confirming)
 
@@ -811,11 +786,7 @@ async def broadcast_confirm(cb: CallbackQuery, state: FSMContext):
     for user_id in recipients:
         try:
             if content_type == "photo":
-                await cb.bot.send_photo(
-                    user_id,
-                    photo=data["photo_id"],
-                    caption=data["caption"] or None,
-                )
+                await cb.bot.send_photo(user_id, photo=data["photo_id"], caption=data["caption"] or None)
             else:
                 await cb.bot.send_message(user_id, data["text"])
             sent += 1
@@ -843,23 +814,23 @@ async def broadcast_cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-# ---------- Админ: закрытие встречи с дайджестом ----------
+# ---------- Админ: закрытие встречи ----------
 
 @router.message(Command("close_session"))
 async def close_session(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
     if sid is None:
         await message.answer("Нет активной встречи для закрытия.")
         return
 
-    topic = await db.get_current_session_topic()
-    errors = await db.get_session_errors(sid)
-    mood = await db.get_mood_stats()
-    top = await db.get_top_error_categories()
+    topic = db.get_current_session_topic()
+    errors = db.get_session_errors(sid)
+    mood = db.get_mood_stats()
+    top = db.get_top_error_categories()
 
-    await db.close_current_session()
+    db.close_current_session()
 
     lines = [f"🔒 Встреча #{sid} «{topic}» закрыта.\n"]
     if mood:
@@ -890,15 +861,15 @@ async def close_session(message: Message):
 async def stats(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    sid = await db.get_current_session_id()
+    sid = db.get_current_session_id()
     if sid is None:
         await message.answer("Нет активной встречи.")
         return
 
-    mood = await db.get_mood_stats()
-    top = await db.get_top_error_categories()
-    total = await db.get_total_users_count()
-    registrations = await db.get_registrations_for_session(sid)
+    mood = db.get_mood_stats()
+    top = db.get_top_error_categories()
+    total = db.get_total_users_count()
+    registrations = db.get_registrations_for_session(sid)
 
     lines = [f"📊 Статистика по встрече #{sid}\n"]
     lines.append(f"👥 Всего в базе: {total}")
@@ -936,7 +907,7 @@ async def stats(message: Message):
 async def export_data(message: Message):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    users, errors, mood = await db.get_all_data_for_export()
+    users, errors, mood = db.get_all_data_for_export()
     if not users and not errors and not mood:
         await message.answer("Нет данных для экспорта.")
         return
@@ -990,7 +961,7 @@ async def export_data(message: Message):
 async def log_error_start(message: Message, state: FSMContext):
     if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
         return
-    if await db.get_current_session_id() is None:
+    if db.get_current_session_id() is None:
         await message.answer("Сначала открой встречу командой /new_session")
         return
     await ask_log_error_kind(message, state)
@@ -1021,7 +992,7 @@ async def log_error_who(message: Message, state: FSMContext):
         await ask_log_error_text(message, state)
         return
     username = text.lstrip("@")
-    user_id = await db.get_user_id_by_username(username)
+    user_id = db.get_user_id_by_username(username)
     if user_id is None:
         await message.answer(
             f"Не нашёл @{username}. Пусть участник напишет /start, или напиши «аноним».",
@@ -1047,8 +1018,8 @@ async def log_error_correction(message: Message, state: FSMContext):
         await back_handler_logic(message, state)
         return
     data = await state.get_data()
-    sid = await db.get_current_session_id()
-    await db.save_error(
+    sid = db.get_current_session_id()
+    db.save_error(
         session_id=sid,
         error_text=data["text"],
         correction_text=message.text,
@@ -1059,132 +1030,11 @@ async def log_error_correction(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Записал 🐞", reply_markup=main_menu_keyboard())
 
-# ---------- Админ: массовое логирование ----------
 
-@router.message(Command("bulk_log"))
-async def bulk_log_start(message: Message, state: FSMContext):
-    if ADMIN_IDS and message.from_user.id not in ADMIN_IDS:
-        return
-    if await db.get_current_session_id() is None:
-        await message.answer("Сначала открой встречу командой /new_session")
-        return
-    await state.set_state(BulkLog.who)
-    await message.answer(
-        "📦 Режим массового ввода ошибок.\n\n"
-        "Кто это сказал? Введи @username участника или «аноним»:",
-        reply_markup=back_inline_keyboard()
-    )
-
-
-@router.message(BulkLog.who)
-async def bulk_log_who(message: Message, state: FSMContext):
-    if message.text == "◀️ Назад":
-        await back_handler_logic(message, state)
-        return
-    text = message.text.strip()
-    if text.lower() == "аноним":
-        await state.update_data(user_id=None)
-    else:
-        username = text.lstrip("@")
-        user_id = await db.get_user_id_by_username(username)
-        if user_id is None:
-            await message.answer(
-                f"Не нашёл @{username}. Пусть участник напишет /start, или напиши «аноним».",
-                reply_markup=back_inline_keyboard(),
-            )
-            return
-        await state.update_data(user_id=user_id)
-
-    await state.set_state(BulkLog.category)
-    await message.answer("Категория для ВСЕХ этих ошибок?", reply_markup=category_keyboard())
-
-
-@router.callback_query(BulkLog.category, F.data.startswith("cat_"))
-async def bulk_log_category(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(category=cb.data.split("_")[1])
-    await state.set_state(BulkLog.kind)
-    await cb.message.answer("Это mistake или error?", reply_markup=kind_keyboard())
-    await cb.answer()
-
-
-@router.callback_query(BulkLog.kind, F.data.startswith("kind_"))
-async def bulk_log_kind(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(kind=cb.data.split("_")[1])
-    await state.set_state(BulkLog.errors)
-    await cb.message.answer(
-        "Отправь список ОШИБОК (каждая с новой строки).\n"
-        "Можно с цифрами, бот их уберёт.\n\n"
-        "Пример:\n1. He go to school\n2. I seen him yesterday",
-        reply_markup=back_inline_keyboard()
-    )
-    await cb.answer()
-
-
-@router.message(BulkLog.errors)
-async def bulk_log_errors(message: Message, state: FSMContext):
-    if message.text == "◀️ Назад":
-        await back_handler_logic(message, state)
-        return
-    errors_list = clean_lines(message.text)
-    if not errors_list:
-        await message.answer("Пустой список. Отправь ошибки текстом.")
-        return
-    
-    await state.update_data(errors_list=errors_list)
-    await state.set_state(BulkLog.corrections)
-    await message.answer(
-        f"Принято {len(errors_list)} ошибок!\n\n"
-        f"Теперь отправь ПРАВИЛЬНЫЕ ОТВЕТЫ в том же порядке (каждый с новой строки):",
-        reply_markup=back_inline_keyboard()
-    )
-
-
-@router.message(BulkLog.corrections)
-async def bulk_log_corrections(message: Message, state: FSMContext):
-    if message.text == "◀️ Назад":
-        await back_handler_logic(message, state)
-        return
-    corrections_list = clean_lines(message.text)
-    data = await state.get_data()
-    errors_list = data["errors_list"]
-
-    if len(errors_list) != len(corrections_list):
-        await message.answer(
-            f"⚠️ Количество не совпадает!\n"
-            f"Ошибок: {len(errors_list)}\n"
-            f"Ответов: {len(corrections_list)}\n\n"
-            f"Пожалуйста, отправь ответы ещё раз (строго по одному на строку)."
-        )
-        return
-
-    # Сохраняем в базу парами
-    sid = await db.get_current_session_id()
-    saved_count = 0
-    for err, corr in zip(errors_list, corrections_list):
-        await db.save_error(
-            session_id=sid,
-            error_text=err,
-            correction_text=corr,
-            category=data["category"],
-            kind=data["kind"],
-            user_id=data.get("user_id"),
-        )
-        saved_count += 1
-
-    await state.clear()
-    await message.answer(
-        f"✅ Успешно сохранено {saved_count} ошибок!\n"
-        f"Участник: {message.from_user.username or 'аноним'}\n"
-        f"Категория: {data['category']}\n"
-        f"Тип: {data['kind']}",
-        reply_markup=main_menu_keyboard()
-    )
 # ---------- Назад ----------
 
 async def back_handler_logic(message: Message, state: FSMContext):
     current = await state.get_state()
-    
-    # Вот этот словарь (мы его уже дополняли)
     prev_map = {
         "MoodBefore:fear": MoodBefore.anxiety,
         "MoodAfter:emotion": MoodAfter.anxiety,
@@ -1196,22 +1046,13 @@ async def back_handler_logic(message: Message, state: FSMContext):
         "Feedback:waiting": None,
         "Registration:level": Registration.name,
         "Registration:motivation": Registration.level,
-        
-        # Добавляем сюда наши новые состояния:
-        "BulkLog:category": BulkLog.who,
-        "BulkLog:kind": BulkLog.category,
-        "BulkLog:errors": BulkLog.kind,
-        "BulkLog:corrections": BulkLog.errors,
+        "Broadcast:confirming": None,
     }
-    
     prev = prev_map.get(current, "not_found")
-    
     if prev == "not_found" or prev is None:
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
         return
-        
-    # --- Дальше идут обработчики (куда нас вернуть) ---
     if prev == MoodBefore.anxiety:
         await ask_mood_before_anxiety(message, state)
     elif prev == MoodAfter.anxiety:
@@ -1232,25 +1073,10 @@ async def back_handler_logic(message: Message, state: FSMContext):
     elif prev == Registration.level:
         await state.set_state(Registration.level)
         await message.answer("Какой у тебя уровень английского?", reply_markup=level_keyboard())
-        
-    # 👇👇👇 ВОТ ЭТИ 4 БЛОКА НУЖНО ДОБАВИТЬ ПЕРЕД ELSE 👇👇👇
-    elif prev == BulkLog.who:
-        await state.set_state(BulkLog.who)
-        await message.answer("Кто это сказал? Введи @username участника или «аноним»:", reply_markup=back_inline_keyboard())
-    elif prev == BulkLog.category:
-        await state.set_state(BulkLog.category)
-        await message.answer("Категория для ВСЕХ этих ошибок?", reply_markup=category_keyboard())
-    elif prev == BulkLog.kind:
-        await state.set_state(BulkLog.kind)
-        await message.answer("Это mistake или error?", reply_markup=kind_keyboard())
-    elif prev == BulkLog.errors:
-        await state.set_state(BulkLog.errors)
-        await message.answer("Отправь список ОШИБОК (каждая с новой строки):", reply_markup=back_inline_keyboard())
-    # 👆👆👆 КОНЕЦ ВСТАВКИ 👆👆👆
-        
     else:
         await state.clear()
         await message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
+
 
 @router.callback_query(F.data == "back")
 async def back_handler(cb: CallbackQuery, state: FSMContext):
@@ -1263,17 +1089,3 @@ async def cancel_handler(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.answer("Действие отменено.", reply_markup=main_menu_keyboard())
     await cb.answer()
-
-
-# ---------- Запуск ----------
-
-async def main():
-    await db.init_db()
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
