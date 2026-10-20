@@ -23,7 +23,7 @@ from bot import router, ADMIN_IDS, BOT_TOKEN
 
 # --- Настройки для вебхука ---
 # Amvera автоматически подставит сюда URL твоего проекта
-BASE_URL = os.getenv("BASE_URL") 
+BASE_URL = os.getenv("PUBLIC_URL") 
 if not BASE_URL:
     # Если переменная не задана, используем URL по умолчанию (для локального теста)
     BASE_URL = "https://your-project-name.amvera.io" 
